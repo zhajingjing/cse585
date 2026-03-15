@@ -1,0 +1,46 @@
+[
+    {
+        "prompt_en": "a bird and a cat",
+        "dimension": [
+            "multiple_objects"
+        ],
+        "auxiliary_info": {
+            "multiple_objects": {
+                "object": "bird and cat"
+            }
+        }
+    },
+    {
+        "prompt_en": "a bird and a dog",
+        "dimension": [
+            "multiple_objects"
+        ],
+        "auxiliary_info": {
+            "multiple_objects": {
+                "object": "bird and dog"
+            }
+        }
+    },
+    {
+        "prompt_en": "a cat and a dog",
+        "dimension": [
+            "multiple_objects"
+        ],
+        "auxiliary_info": {
+            "multiple_objects": {
+                "object": "cat and dog"
+            }
+        }
+    },
+    {
+        "prompt_en": "a bird and a dog.",
+        "dimension": [
+            "multiple_objects"
+        ],
+        "auxiliary_info": {
+            "multiple_objects": {
+                "object": "bird and dog"
+            }
+        }
+    }
+]

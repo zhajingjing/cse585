@@ -1,0 +1,1202 @@
+[
+    {
+        "prompt_en": "In a still frame, a stop sign",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A motionless shot of a stop sign",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a stop sign, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a stop sign, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a stop sign, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a toilet, frozen in time",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a toilet, completely unmoving",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a toilet, frozen in time, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a toilet, frozen in time, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a toilet, frozen in time, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a laptop, frozen in time",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a laptop, completely unmoving",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a laptop, frozen in time, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a laptop, frozen in time, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a laptop, frozen in time, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of alley",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of alley",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of alley, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of alley, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of alley, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bar",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of bar",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bar, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bar, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bar, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of barn",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of barn",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of barn, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of barn, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of barn, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bathroom",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of bathroom",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bathroom, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bathroom, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bathroom, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bedroom",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of bedroom",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bedroom, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bedroom, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of bedroom, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of cliff",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of cliff",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of cliff, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of cliff, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of cliff, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, courtyard",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A motionless shot of courtyard",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, courtyard, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, courtyard, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, courtyard, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, gas station",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A motionless shot of gas station",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, gas station, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, gas station, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, gas station, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of house",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of house",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of house, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of house, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of house, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "indoor gymnasium, frozen in time",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "indoor gymnasium, completely unmoving",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "indoor gymnasium, frozen in time, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "indoor gymnasium, frozen in time, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "indoor gymnasium, frozen in time, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of indoor library",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of indoor library",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of indoor library, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of indoor library, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of indoor library, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of kitchen",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of kitchen",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of kitchen, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of kitchen, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of kitchen, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of palace",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of palace",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of palace, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of palace, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of palace, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, parking lot",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A motionless shot of parking lot",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, parking lot, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, parking lot, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, parking lot, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, phone booth",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A motionless shot of phone booth",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, phone booth, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, phone booth, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, phone booth, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of restaurant",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of restaurant",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of restaurant, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of restaurant, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of restaurant, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of tower",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of tower",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of tower, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of tower, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of tower, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bowl",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a bowl",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bowl, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bowl, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bowl, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an apple",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of an apple",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an apple, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an apple, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an apple, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bench",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a bench",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bench, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bench, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bench, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bed",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a bed",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bed, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bed, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bed, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a chair",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a chair",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a chair, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a chair, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a chair, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a cup",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a cup",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a cup, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a cup, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a cup, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a dining table",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a dining table",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a dining table, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a dining table, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a dining table, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a pear",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A motionless shot of a pear",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a pear, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a pear, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a pear, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bunch of grapes",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a bunch of grapes",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bunch of grapes, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bunch of grapes, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bunch of grapes, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bowl on the kitchen counter",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a bowl on the kitchen counter",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bowl on the kitchen counter, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bowl on the kitchen counter, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a bowl on the kitchen counter, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a beautiful, handcrafted ceramic bowl",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a beautiful, handcrafted ceramic bowl",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a beautiful, handcrafted ceramic bowl, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a beautiful, handcrafted ceramic bowl, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a beautiful, handcrafted ceramic bowl, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an antique bowl",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of an antique bowl",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an antique bowl, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an antique bowl, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an antique bowl, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an exquisite mahogany dining table",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of an exquisite mahogany dining table",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an exquisite mahogany dining table, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an exquisite mahogany dining table, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of an exquisite mahogany dining table, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a wooden bench in the park",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a wooden bench in the park",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a wooden bench in the park, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a wooden bench in the park, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a wooden bench in the park, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a beautiful wrought-iron bench surrounded by blooming flowers",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a beautiful wrought-iron bench surrounded by blooming flowers",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a beautiful wrought-iron bench surrounded by blooming flowers, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a beautiful wrought-iron bench surrounded by blooming flowers, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a beautiful wrought-iron bench surrounded by blooming flowers, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a park bench with a view of the lake",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A motionless shot of a park bench with a view of the lake",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a park bench with a view of the lake, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a park bench with a view of the lake, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "In a still frame, a park bench with a view of the lake, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a vintage rocking chair was placed on the porch",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of a vintage rocking chair was placed on the porch",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a vintage rocking chair was placed on the porch, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a vintage rocking chair was placed on the porch, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of a vintage rocking chair was placed on the porch, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of the jail cell was small and dimly lit, with cold, steel bars",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of the jail cell was small and dimly lit, with cold, steel bars",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of the jail cell was small and dimly lit, with cold, steel bars, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of the jail cell was small and dimly lit, with cold, steel bars, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of the jail cell was small and dimly lit, with cold, steel bars, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of the phone booth was tucked away in a quiet alley",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A peaceful and quiet view of the phone booth was tucked away in a quiet alley",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of the phone booth was tucked away in a quiet alley, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of the phone booth was tucked away in a quiet alley, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "A tranquil tableau of the phone booth was tucked away in a quiet alley, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a dilapidated phone booth stood as a relic of a bygone era on the sidewalk, frozen in time",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a dilapidated phone booth stood as a relic of a bygone era on the sidewalk, completely unmoving",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a dilapidated phone booth stood as a relic of a bygone era on the sidewalk, frozen in time, surrounded by thick morning fog",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a dilapidated phone booth stood as a relic of a bygone era on the sidewalk, frozen in time, illuminated by the warm light of a golden hour sunset",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    },
+    {
+        "prompt_en": "a dilapidated phone booth stood as a relic of a bygone era on the sidewalk, frozen in time, looking slightly weathered and old",
+        "dimension": [
+            "temporal_flickering"
+        ]
+    }
+]
