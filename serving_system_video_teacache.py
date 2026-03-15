@@ -69,7 +69,7 @@ def request_scheduler_video(
 
         while not new_cache_queue.empty():
             cache_data = new_cache_queue.get()
-            new_cached_latents = cache_data["cached_latents"]
+            new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
             new_cached_prompt = cache_data["prompt"]
             new_query_embedding = cache_data["query_embedding"]
             while len(cache.item_map) + len(cache.k_values) > cache.max_size:
@@ -201,7 +201,7 @@ def request_scheduler_video(
     while not req_queue.empty():
         while not new_cache_queue.empty():
             cache_data = new_cache_queue.get()
-            new_cached_latents = cache_data["cached_latents"]
+            new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
             new_cached_prompt = cache_data["prompt"]
             new_query_embedding = cache_data["query_embedding"]
             while len(cache.item_map) + len(cache.k_values) > cache.max_size:
@@ -264,16 +264,16 @@ def worker_video(
     while True:
         try:
             request = req_queue.get(timeout=10)
+            process_start = time.time()
             idle_counter = 0
             prompt = request["prompt"]
             # Same naming as eval/teacache/experiments/utils.py: {prompt}-{l}.mp4
             for l in range(loop):
                 out_path = os.path.join(video_directory, f"{prompt}-{l}.mp4")
 
-                use_cache = (l == 0)
-                if request["cached"] is None or not use_cache:
-                    # Full generation (cache miss or extra loop)
-                    collect_latents = tuple(K_VALUES_VIDEO) if (use_cache and request["cached"] is None) else None
+                if request["cached"] is None:
+                    # Full generation (cache miss); write cache only on first loop iteration
+                    collect_latents = tuple(K_VALUES_VIDEO) if (l == 0) else None
                     result = pipeline.generate(
                         prompt,
                         resolution=resolution,
@@ -291,7 +291,7 @@ def worker_video(
                     video = output.video[0]
                     engine.save_video(video, out_path)
                     if not no_nirvana and collected_latents is not None and request.get("query_embedding") is not None:
-                        cached_latents = [z.cpu() for z in collected_latents]
+                        cached_latents = [z.cpu().clone() for z in collected_latents]
                         qe = request["query_embedding"]
                         qe_np = qe.numpy().reshape(1, -1) if hasattr(qe, "numpy") else np.array(qe).reshape(1, -1)
                         new_cache_queue.put(
@@ -302,7 +302,7 @@ def worker_video(
                             }
                         )
                 else:
-                    # Cache hit, first loop only
+                    # Nirvana hit: use same cached latent for every loop iteration, only seed differs
                     cache_latent = request["latent"]
                     # Normalize cached latent shape to [B, C, T, H, W].
                     # Stored latents may already include batch dim (5D), and older entries can be 6D.
@@ -332,7 +332,8 @@ def worker_video(
                     engine.save_video(video, out_path)
 
             finish_time = time.time() - request["start_time"]
-            latency_queue.put(finish_time)
+            pure_processing_time = time.time() - process_start
+            latency_queue.put((finish_time, pure_processing_time))
 
         except queue.Empty:
             idle_counter += 1
@@ -529,9 +530,12 @@ def main():
 
     total_requests = len(prompts)
     all_latencies = []
+    all_processing_times = []
     with tqdm(total=total_requests, desc="Requests", unit="req") as pbar:
         for _ in range(total_requests):
-            all_latencies.append(latency_queue.get())
+            finish_time, pure_processing_time = latency_queue.get()
+            all_latencies.append(finish_time)
+            all_processing_times.append(pure_processing_time)
             pbar.update(1)
 
     for p in workers:
@@ -543,6 +547,10 @@ def main():
     if all_latencies:
         print(
             f"[Per-request latency] min={min(all_latencies):.2f}s max={max(all_latencies):.2f}s avg={np.mean(all_latencies):.2f}s (n={len(all_latencies)})"
+        )
+    if all_processing_times:
+        print(
+            f"[Pure processing time] min={min(all_processing_times):.2f}s max={max(all_processing_times):.2f}s avg={np.mean(all_processing_times):.2f}s (n={len(all_processing_times)})"
         )
     hits = cache_stats.get("hits", 0)
     misses = cache_stats.get("misses", 0)
