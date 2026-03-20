@@ -29,8 +29,11 @@ def fetch_readme() -> str:
     Returns:
         The lines in the README file.
     """
-    with open("README.md", encoding="utf-8") as f:
-        return f.read()
+    try:
+        with open("README.md", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
 
 
 def custom_install():
