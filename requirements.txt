@@ -20,7 +20,7 @@ rich
 safetensors
 sentencepiece
 timm
-torch>=1.13
+# torch>=1.13
 tqdm
 peft==0.13.2
 transformers==4.39.3
