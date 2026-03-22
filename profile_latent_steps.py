@@ -21,6 +21,7 @@ Experiment 2 — Cross-Prompt Injection Test:
 import os
 import torch
 import numpy as np
+import imageio
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -31,7 +32,7 @@ from videosys.pipelines.open_sora.pipeline_open_sora import OpenSoraConfig
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-NUM_STEPS = 30          # must match OpenSoraConfig.num_sampling_steps
+NUM_STEPS = 50          # must match OpenSoraConfig.num_sampling_steps
 RESOLUTION = "480p"
 ASPECT_RATIO = "9:16"
 NUM_FRAMES = "2s"
@@ -140,7 +141,7 @@ INJECTION_PAIRS = [
 
 # Steps at which to save latents for injection
 # Full: range(1, NUM_STEPS+1). Coarse for quick runs:
-INJECT_STEPS = [1, 3, 5, 8, 10, 12, 15, 18, 20, 22, 25, 27, 29, 30]
+INJECT_STEPS = [1, 3, 5, 8, 10, 12, 15, 18, 20, 22, 25, 27, 29, 30]  # only cache first 30 steps
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -277,7 +278,7 @@ def run_exp1():
             ax.plot(step_axis, sim[ii, jj], linewidth=1.5, label=label, color=colors[c_idx])
             c_idx += 1
     ax.axhline(0.9, color="gray", linestyle="--", linewidth=1)
-    ax.set_xlabel("Denoising step (1 = first, 30 = last)")
+    ax.set_xlabel(f"Denoising step (1 = first, {NUM_STEPS} = last)")
     ax.set_ylabel("Cosine similarity")
     ax.set_title("Cross-category latent similarity (representative prompts)\n"
                  "Lower = categories diverged at that step")
@@ -355,8 +356,9 @@ def _run_one_injection_pair(label, prompt_source, prompt_target, description):
         num_frames=NUM_FRAMES, seed=SEED, verbose=False,
     )
     baseline_video = baseline_result.video[0]
-    Image.fromarray(baseline_video[0].numpy()).save(
-        os.path.join(pair_dir, "baseline_target.png"))
+    imageio.mimwrite(
+        os.path.join(pair_dir, "baseline_target.mp4"),
+        [f.numpy().astype(np.uint8) for f in baseline_video], fps=8)
 
     # 3. Source reference
     source_result = pipeline.generate(
@@ -364,8 +366,9 @@ def _run_one_injection_pair(label, prompt_source, prompt_target, description):
         resolution=RESOLUTION, aspect_ratio=ASPECT_RATIO,
         num_frames=NUM_FRAMES, seed=SEED, verbose=False,
     )
-    Image.fromarray(source_result.video[0][0].numpy()).save(
-        os.path.join(pair_dir, "source_reference.png"))
+    imageio.mimwrite(
+        os.path.join(pair_dir, "source_reference.mp4"),
+        [f.numpy().astype(np.uint8) for f in source_result.video[0]], fps=8)
 
     # 4. Injection sweep
     latent_distances = {}
@@ -377,10 +380,12 @@ def _run_one_injection_pair(label, prompt_source, prompt_target, description):
             cache_latent=source_latents[idx].clone(),
             cache_start_step=inject_at_step,
         )
-        first_frame = result_inj.video[0][0].numpy()
-        Image.fromarray(first_frame.astype(np.uint8)).save(
-            os.path.join(pair_dir, f"inject_step{inject_at_step:03d}.png"))
+        inj_frames = result_inj.video[0]
+        imageio.mimwrite(
+            os.path.join(pair_dir, f"inject_step{inject_at_step:03d}.mp4"),
+            [f.numpy().astype(np.uint8) for f in inj_frames], fps=8)
 
+        first_frame = inj_frames[0].numpy()
         l2 = (torch.tensor(first_frame).float() - baseline_video[0].float()).norm().item()
         latent_distances[inject_at_step] = l2
         print(f"      step={inject_at_step:3d}  L2={l2:.1f}")
