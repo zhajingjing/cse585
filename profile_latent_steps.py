@@ -153,7 +153,7 @@ config = OpenSoraConfig(
     enable_pab=False,
 )
 engine = VideoSysEngine(config)
-pipeline = engine.driver_worker.pipeline  # direct pipeline access
+pipeline = engine.driver_worker  # driver_worker is the pipeline directly
 
 
 # ── Helper: decode one latent to a PIL thumbnail ──────────────────────────────
