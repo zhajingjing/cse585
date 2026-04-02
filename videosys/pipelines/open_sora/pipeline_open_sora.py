@@ -527,9 +527,14 @@ class OpenSoraPipeline(VideoSysPipeline):
         update_steps(self._config.num_sampling_steps)
 
         # == prepare batch prompts ==
-        batch_prompts = [prompt]
-        ms = [ms]
-        refs = [refs]
+        if isinstance(prompt, list):
+            batch_prompts = prompt
+            ms = ms if isinstance(ms, list) else [ms] * len(prompt)
+            refs = refs if isinstance(refs, list) else [refs] * len(prompt)
+        else:
+            batch_prompts = [prompt]
+            ms = [ms]
+            refs = [refs]
 
         # == get json from prompts ==
         batch_prompts, refs, ms = extract_json_from_prompts(batch_prompts, refs, ms)

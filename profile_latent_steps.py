@@ -1,5 +1,5 @@
 """
-Profiling script: two experiments to find latent caching thresholds in Open Sora.
+Profiling script: two experiments to find latent caching thresholds in Wan 2.1 T2V-1.3B.
 
 Prompt categories are designed to test three orthogonal axes:
   - Semantic distance (near-duplicate → same category → unrelated)
@@ -14,7 +14,7 @@ Experiment 1 — Latent Similarity Curve:
 
 Experiment 2 — Cross-Prompt Injection Test:
   Run prompt A fully, save intermediate latents at steps k=1..T.
-  For prompt B, inject A's step-k latent and continue with B's text.
+  For prompt B, inject A's step-k latent via callback and continue with B's text.
   Plot L2(output, baseline_B) vs k — the inflection is your cache cutoff.
 """
 
@@ -27,17 +27,28 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
-from videosys import VideoSysEngine
-from videosys.pipelines.open_sora.pipeline_open_sora import OpenSoraConfig
+from diffusers import AutoencoderKLWan, WanPipeline
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-NUM_STEPS = 50          # must match OpenSoraConfig.num_sampling_steps
-RESOLUTION = "480p"
-ASPECT_RATIO = "9:16"
-NUM_FRAMES = "2s"
-SEED = 42
+MODEL_ID   = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+NUM_STEPS  = 50
+HEIGHT     = 480
+WIDTH      = 832
+NUM_FRAMES = 81        # ~5 s at 16 fps
+FPS        = 16
+SEED       = 42
+BATCH_SIZE = 2         # prompts per generate call (reduce if OOM)
 OUTPUT_DIR = "./profile_outputs"
+
+# Standard Wan negative prompt (from model card)
+NEGATIVE_PROMPT = (
+    "Bright tones, overexposed, static, blurred details, subtitles, style, works, "
+    "paintings, image, still, overall gray, worst quality, low quality, JPEG compression "
+    "residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, "
+    "deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, "
+    "three legs, many people in the background, walking backwards"
+)
 
 # ── Prompt catalogue ───────────────────────────────────────────────────────────
 #
@@ -139,37 +150,81 @@ INJECTION_PAIRS = [
                    "unrelated — expect immediate divergence"),
 ]
 
-# Steps at which to save latents for injection
-# Full: range(1, NUM_STEPS+1). Coarse for quick runs:
-INJECT_STEPS = [1, 3, 5, 8, 10, 12, 15, 18, 20, 22, 25, 27, 29, 30]  # only cache first 30 steps
+# Steps at which to save latents for injection (1-based, first 30 of 50)
+INJECT_STEPS = [1, 3, 5, 8, 10, 12, 15, 18, 20, 22, 25, 27, 29, 30]
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ── Build pipeline (no PAB, no TeaCache — clean baseline) ──────────────────────
+# ── Build pipeline ─────────────────────────────────────────────────────────────
+# VAE must be float32 for decode quality; transformer runs in bfloat16.
 
-config = OpenSoraConfig(
-    num_sampling_steps=NUM_STEPS,
-    cfg_scale=7.0,
-    num_gpus=1,
-    enable_pab=False,
-)
-engine = VideoSysEngine(config)
-pipeline = engine.driver_worker  # driver_worker is the pipeline directly
+vae = AutoencoderKLWan.from_pretrained(MODEL_ID, subfolder="vae", torch_dtype=torch.float32)
+pipe = WanPipeline.from_pretrained(MODEL_ID, vae=vae, torch_dtype=torch.bfloat16)
+pipe.to("cuda")
 
 
-# ── Helper: decode one latent to a PIL thumbnail ──────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
-def latent_to_thumb(z, pipeline, num_frames_int=34, size=(128, 72)):
-    """Decode a single latent tensor to a small PIL image (first frame)."""
+def _make_generator():
+    return torch.Generator("cuda").manual_seed(SEED)
+
+
+def _save_video(frames, path):
+    """Save a list of PIL Images to an mp4."""
+    imageio.mimwrite(path, [np.array(f, dtype=np.uint8) for f in frames], fps=FPS)
+
+
+def latent_to_thumb(z, size=(128, 72)):
+    """Decode a single [C, T, H, W] latent tensor to a PIL thumbnail (first frame)."""
+    z = z.unsqueeze(0).to(pipe.device, dtype=torch.float32)
     with torch.no_grad():
-        video = pipeline.vae(z.to(pipeline._dtype), decode_only=True, num_frames=num_frames_int)
-    video = video.clamp(-1, 1)
-    video = (video + 1) / 2  # [0, 1]
-    # video shape: [B, C, T, H, W] → take first batch, first frame
+        video = pipe.vae.decode(z / pipe.vae.config.scaling_factor).sample
+    video = video.clamp(-1, 1).add(1).div(2)  # [0, 1]
     frame = video[0, :, 0].permute(1, 2, 0).float().cpu().numpy()
     frame = (frame * 255).clip(0, 255).astype(np.uint8)
-    img = Image.fromarray(frame).resize(size, Image.LANCZOS)
-    return img
+    return Image.fromarray(frame).resize(size, Image.LANCZOS)
+
+
+def _generate(prompts, collect_steps=None, inject_latent=None, inject_at_step=None):
+    """
+    Wrapper around WanPipeline.__call__ that handles:
+      - batched prompts (str or list[str])
+      - latent collection at specified 1-based steps via callback
+      - latent injection at a specified 1-based step via callback (Exp 2)
+
+    Returns:
+      frames    — list[list[PIL.Image]], one inner list per prompt
+      collected — list of Tensor[B, C, T, H, W] (cpu float32), one per collected step
+    """
+    collected = []
+    collect_set = set(collect_steps) if collect_steps else set()
+
+    def callback(_pipe, step_index, _timestep, callback_kwargs):
+        # Inject: after 1-based step inject_at_step, swap in source latent
+        if inject_latent is not None and step_index == inject_at_step - 1:
+            callback_kwargs["latents"] = inject_latent.to(
+                callback_kwargs["latents"].device,
+                callback_kwargs["latents"].dtype,
+            )
+        # Collect latent at this step (after potential injection)
+        if (step_index + 1) in collect_set:
+            collected.append(callback_kwargs["latents"].float().cpu().clone())
+        return callback_kwargs
+
+    output = pipe(
+        prompt=prompts,
+        negative_prompt=NEGATIVE_PROMPT,
+        height=HEIGHT,
+        width=WIDTH,
+        num_frames=NUM_FRAMES,
+        num_inference_steps=NUM_STEPS,
+        guidance_scale=5.0,
+        generator=_make_generator(),
+        callback_on_step_end=callback,
+        callback_on_step_end_tensor_inputs=["latents"],
+        output_type="pil",
+    )
+    return output.frames, collected
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -188,31 +243,34 @@ def run_exp1():
     print("Experiment 1: Latent Similarity Curve (grouped)")
     print("="*60)
 
-    # all_latents: { pid: [z_step0, z_step1, ...] }
+    # all_latents: { pid: [z_step1, z_step2, ...] }  each z is [C, T, H, W]
     all_latents = {}
     pid_to_group = {}
     pid_to_text  = {}
 
-    for group_id, entries in PROMPT_GROUPS.items():
-        for pid, text in entries:
-            print(f"\n  [{group_id}] Generating {pid}: '{text}'")
-            _, collected = pipeline.generate(
-                prompt=text,
-                resolution=RESOLUTION,
-                aspect_ratio=ASPECT_RATIO,
-                num_frames=NUM_FRAMES,
-                seed=SEED,
-                verbose=False,
-                collect_latents_at_steps=tuple(range(1, NUM_STEPS + 1)),
-            )
-            all_latents[pid] = [z.float().cpu() for z in collected]
-            pid_to_group[pid] = group_id
-            pid_to_text[pid]  = text
-            print(f"    → {len(collected)} latents, shape {collected[0].shape}")
+    # Flatten all prompts and batch for speed.
+    flat_entries = [(gid, pid, text)
+                    for gid, entries in PROMPT_GROUPS.items()
+                    for pid, text in entries]
 
-    pids  = list(all_latents.keys())
-    n     = len(pids)
-    steps = len(all_latents[pids[0]])
+    for batch_start in range(0, len(flat_entries), BATCH_SIZE):
+        batch   = flat_entries[batch_start: batch_start + BATCH_SIZE]
+        b_pids  = [e[1] for e in batch]
+        b_texts = [e[2] for e in batch]
+        print(f"\n  Generating batch {batch_start // BATCH_SIZE + 1}: {', '.join(b_pids)}")
+
+        _, collected = _generate(b_texts, collect_steps=range(1, NUM_STEPS + 1))
+
+        # collected: list[Tensor[B, C, T, H, W]], one tensor per step — split per prompt
+        for i, (gid, pid, text) in enumerate(batch):
+            all_latents[pid] = [z[i].float().cpu() for z in collected]
+            pid_to_group[pid] = gid
+            pid_to_text[pid]  = text
+        print(f"    → {len(collected)} steps, shape per prompt {collected[0][0].shape}")
+
+    pids      = list(all_latents.keys())
+    n         = len(pids)
+    steps     = len(all_latents[pids[0]])
     step_axis = list(range(1, steps + 1))
 
     # ── Compute pairwise cosine similarity ──────────────────────────────────
@@ -242,8 +300,7 @@ def run_exp1():
             for j in range(i + 1, len(g_pids)):
                 pi, pj = g_pids[i], g_pids[j]
                 ii, jj = pids.index(pi), pids.index(pj)
-                label = f"{pi} vs {pj}"
-                ax.plot(step_axis, sim[ii, jj], linewidth=1.5, label=label)
+                ax.plot(step_axis, sim[ii, jj], linewidth=1.5, label=f"{pi} vs {pj}")
         ax.set_title(gid, fontsize=9)
         ax.set_xlabel("Denoising step")
         ax.set_ylabel("Cosine similarity")
@@ -251,7 +308,6 @@ def run_exp1():
         ax.set_ylim(-0.1, 1.05)
         ax.legend(fontsize=6)
         ax.grid(True, alpha=0.25)
-    # hide unused axes
     for ax_idx in range(len(group_ids), nrows * ncols):
         axes[ax_idx // ncols][ax_idx % ncols].set_visible(False)
     fig.suptitle("Intra-group latent cosine similarity vs denoising step\n"
@@ -263,7 +319,6 @@ def run_exp1():
     print(f"\n  Saved intra-group similarity → {path}")
 
     # ── Figure (b): cross-group representative pairs ──────────────────────────
-    # Pick the first prompt from each group as representative; plot all cross-pairs.
     rep_pids = [entries[0][0] for entries in PROMPT_GROUPS.values()]
     rep_n    = len(rep_pids)
     fig, ax  = plt.subplots(figsize=(11, 6))
@@ -274,8 +329,8 @@ def run_exp1():
             pi, pj = rep_pids[i], rep_pids[j]
             ii, jj = pids.index(pi), pids.index(pj)
             gi, gj = pid_to_group[pi], pid_to_group[pj]
-            label  = f"{gi}[{pi}] vs {gj}[{pj}]"
-            ax.plot(step_axis, sim[ii, jj], linewidth=1.5, label=label, color=colors[c_idx])
+            ax.plot(step_axis, sim[ii, jj], linewidth=1.5,
+                    label=f"{gi}[{pi}] vs {gj}[{pj}]", color=colors[c_idx])
             c_idx += 1
     ax.axhline(0.9, color="gray", linestyle="--", linewidth=1)
     ax.set_xlabel(f"Denoising step (1 = first, {NUM_STEPS} = last)")
@@ -291,15 +346,14 @@ def run_exp1():
     print(f"  Saved cross-group similarity → {path}")
 
     # ── Figure (c): temporal-causal group — highlight causal vs reversed pairs ─
-    # Group E: pairs (E1,E2), (E3,E4), (E5,E6) are causal vs reversed.
     e_pids = [pid for pid, grp in pid_to_group.items() if grp == "E_causal"]
     if len(e_pids) >= 6:
         causal_pairs = [(e_pids[0], e_pids[1]), (e_pids[2], e_pids[3]), (e_pids[4], e_pids[5])]
         fig, ax = plt.subplots(figsize=(9, 5))
         for pi, pj in causal_pairs:
             ii, jj = pids.index(pi), pids.index(pj)
-            label = f"{pi}↔{pj}  ({pid_to_text[pi][:30]}…)"
-            ax.plot(step_axis, sim[ii, jj], linewidth=2, label=label)
+            ax.plot(step_axis, sim[ii, jj], linewidth=2,
+                    label=f"{pi}↔{pj}  ({pid_to_text[pi][:30]}…)")
         ax.axhline(0.9, color="gray", linestyle="--", linewidth=0.8)
         ax.set_xlabel("Denoising step")
         ax.set_ylabel("Cosine similarity")
@@ -341,52 +395,30 @@ def _run_one_injection_pair(label, prompt_source, prompt_target, description):
     print(f"    Source: '{prompt_source}'")
     print(f"    Target: '{prompt_target}'")
 
-    # 1. Collect source latents
-    _, source_latents = pipeline.generate(
-        prompt=prompt_source,
-        resolution=RESOLUTION, aspect_ratio=ASPECT_RATIO,
-        num_frames=NUM_FRAMES, seed=SEED, verbose=False,
-        collect_latents_at_steps=tuple(INJECT_STEPS),
-    )
+    # 1. Collect source latents + source reference video in one pass.
+    #    collected[i] has shape [1, C, T, H, W] — one latent per INJECT_STEPS entry.
+    source_frames, source_latents = _generate(prompt_source, collect_steps=INJECT_STEPS)
+    _save_video(source_frames[0], os.path.join(pair_dir, "source_reference.mp4"))
 
-    # 2. Baseline: target from scratch
-    baseline_result = pipeline.generate(
-        prompt=prompt_target,
-        resolution=RESOLUTION, aspect_ratio=ASPECT_RATIO,
-        num_frames=NUM_FRAMES, seed=SEED, verbose=False,
-    )
-    baseline_video = baseline_result.video[0]
-    imageio.mimwrite(
-        os.path.join(pair_dir, "baseline_target.mp4"),
-        [f.numpy().astype(np.uint8) for f in baseline_video], fps=8)
+    # 2. Baseline: target from scratch (no injection)
+    baseline_frames, _ = _generate(prompt_target)
+    _save_video(baseline_frames[0], os.path.join(pair_dir, "baseline_target.mp4"))
+    baseline_first = np.array(baseline_frames[0][0], dtype=np.float32)
 
-    # 3. Source reference
-    source_result = pipeline.generate(
-        prompt=prompt_source,
-        resolution=RESOLUTION, aspect_ratio=ASPECT_RATIO,
-        num_frames=NUM_FRAMES, seed=SEED, verbose=False,
-    )
-    imageio.mimwrite(
-        os.path.join(pair_dir, "source_reference.mp4"),
-        [f.numpy().astype(np.uint8) for f in source_result.video[0]], fps=8)
-
-    # 4. Injection sweep
+    # 3. Injection sweep: for each step k, replace target's latent at step k
+    #    with source's step-k latent, then continue with target's text.
     latent_distances = {}
     for idx, inject_at_step in enumerate(INJECT_STEPS):
-        result_inj = pipeline.generate(
-            prompt=prompt_target,
-            resolution=RESOLUTION, aspect_ratio=ASPECT_RATIO,
-            num_frames=NUM_FRAMES, seed=SEED, verbose=False,
-            cache_latent=source_latents[idx].clone(),
-            cache_start_step=inject_at_step,
+        inj_frames, _ = _generate(
+            prompt_target,
+            inject_latent=source_latents[idx],   # shape [1, C, T, H, W]
+            inject_at_step=inject_at_step,
         )
-        inj_frames = result_inj.video[0]
-        imageio.mimwrite(
-            os.path.join(pair_dir, f"inject_step{inject_at_step:03d}.mp4"),
-            [f.numpy().astype(np.uint8) for f in inj_frames], fps=8)
+        _save_video(inj_frames[0],
+                    os.path.join(pair_dir, f"inject_step{inject_at_step:03d}.mp4"))
 
-        first_frame = inj_frames[0].numpy()
-        l2 = (torch.tensor(first_frame).float() - baseline_video[0].float()).norm().item()
+        inj_first = np.array(inj_frames[0][0], dtype=np.float32)
+        l2 = np.linalg.norm(inj_first - baseline_first)
         latent_distances[inject_at_step] = l2
         print(f"      step={inject_at_step:3d}  L2={l2:.1f}")
 
@@ -409,14 +441,14 @@ def run_exp2():
         ld = all_results[label]
         steps_sorted = sorted(ld.keys())
         l2_vals = [ld[s] for s in steps_sorted]
-        # Normalise to [0,1] so pairs with different scales are comparable
-        l2_arr = np.array(l2_vals, dtype=float)
+        l2_arr  = np.array(l2_vals, dtype=float)
         l2_norm = (l2_arr - l2_arr.min()) / (l2_arr.max() - l2_arr.min() + 1e-6)
         ax.plot(steps_sorted, l2_norm, "o-", linewidth=2, markersize=5,
                 color=color, label=f"[{label}] {desc[:55]}")
 
     ax.set_xlabel("Step at which source latent was injected")
-    ax.set_ylabel("Normalised L2 distance to target baseline\n(0 = identical to target, 1 = maximally distorted)")
+    ax.set_ylabel("Normalised L2 distance to target baseline\n"
+                  "(0 = identical to target, 1 = maximally distorted)")
     ax.set_title("Cross-Prompt Injection: when does source latent stop dominating output?\n"
                  "(curves should fall from 1→0; the knee = cache threshold)")
     ax.legend(fontsize=7, bbox_to_anchor=(1.01, 1), loc="upper left")
@@ -460,7 +492,6 @@ if __name__ == "__main__":
     if args.groups:
         for gid in args.groups:
             assert gid in PROMPT_GROUPS, f"Unknown group '{gid}'. Valid: {list(PROMPT_GROUPS)}"
-        # Filter to requested groups
         original = PROMPT_GROUPS.copy()
         PROMPT_GROUPS.clear()
         for gid in args.groups:
