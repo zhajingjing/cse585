@@ -28,6 +28,9 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 from diffusers import AutoencoderKLWan, WanPipeline
+from tqdm import tqdm
+from transformers import XCLIPTokenizer, XCLIPTextModel
+from scipy.stats import spearmanr
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -35,7 +38,7 @@ MODEL_ID   = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 NUM_STEPS  = 50
 HEIGHT     = 480
 WIDTH      = 832
-NUM_FRAMES = 81        # ~5 s at 16 fps
+NUM_FRAMES = 33        # ~2 s at 16 fps
 FPS        = 16
 SEED       = 42
 BATCH_SIZE = 2         # prompts per generate call (reduce if OOM)
@@ -151,7 +154,7 @@ INJECTION_PAIRS = [
 ]
 
 # Steps at which to save latents for injection (1-based, first 30 of 50)
-INJECT_STEPS = [1, 3, 5, 8, 10, 12, 15, 18, 20, 22, 25, 27, 29, 30]
+INJECT_STEPS = [1, 5, 10, 15, 20, 25, 30, 40]
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -174,57 +177,115 @@ def _save_video(frames, path):
     imageio.mimwrite(path, [np.array(f, dtype=np.uint8) for f in frames], fps=FPS)
 
 
+def _vae_decode(latents):
+    """Denormalize latents and decode through VAE. Returns [B, C, T, H, W] in [-1, 1]."""
+    lat_mean = torch.tensor(pipe.vae.config.latents_mean, device=latents.device, dtype=latents.dtype).view(1, -1, 1, 1, 1)
+    lat_std  = torch.tensor(pipe.vae.config.latents_std,  device=latents.device, dtype=latents.dtype).view(1, -1, 1, 1, 1)
+    z = latents * lat_std + lat_mean  # inverse of (x - mean) / std
+    return pipe.vae.decode(z).sample
+
+
 def latent_to_thumb(z, size=(128, 72)):
     """Decode a single [C, T, H, W] latent tensor to a PIL thumbnail (first frame)."""
     z = z.unsqueeze(0).to(pipe.device, dtype=torch.float32)
     with torch.no_grad():
-        video = pipe.vae.decode(z / pipe.vae.config.scaling_factor).sample
+        video = _vae_decode(z)
     video = video.clamp(-1, 1).add(1).div(2)  # [0, 1]
     frame = video[0, :, 0].permute(1, 2, 0).float().cpu().numpy()
     frame = (frame * 255).clip(0, 255).astype(np.uint8)
     return Image.fromarray(frame).resize(size, Image.LANCZOS)
 
 
-def _generate(prompts, collect_steps=None, inject_latent=None, inject_at_step=None):
+def _generate(prompts, collect_steps=None, start_latent=None, start_step=None):
     """
-    Wrapper around WanPipeline.__call__ that handles:
+    Explicit denoising loop (teacache-style) that handles:
       - batched prompts (str or list[str])
-      - latent collection at specified 1-based steps via callback
-      - latent injection at a specified 1-based step via callback (Exp 2)
+      - latent collection at specified 1-based steps
+      - skipping the first k steps by providing a starting latent and step index
+        (start_latent: Tensor[B, C, T, H, W], start_step: 1-based step to resume from)
 
     Returns:
       frames    — list[list[PIL.Image]], one inner list per prompt
       collected — list of Tensor[B, C, T, H, W] (cpu float32), one per collected step
     """
+    if isinstance(prompts, str):
+        prompts = [prompts]
+    batch_size = len(prompts)
     collected = []
     collect_set = set(collect_steps) if collect_steps else set()
+    step_offset = start_step if start_step is not None else 0
 
-    def callback(_pipe, step_index, _timestep, callback_kwargs):
-        # Inject: after 1-based step inject_at_step, swap in source latent
-        if inject_latent is not None and step_index == inject_at_step - 1:
-            callback_kwargs["latents"] = inject_latent.to(
-                callback_kwargs["latents"].device,
-                callback_kwargs["latents"].dtype,
-            )
-        # Collect latent at this step (after potential injection)
-        if (step_index + 1) in collect_set:
-            collected.append(callback_kwargs["latents"].float().cpu().clone())
-        return callback_kwargs
+    device = pipe.device
+    dtype = torch.bfloat16
 
-    output = pipe(
-        prompt=prompts,
-        negative_prompt=NEGATIVE_PROMPT,
-        height=HEIGHT,
-        width=WIDTH,
-        num_frames=NUM_FRAMES,
-        num_inference_steps=NUM_STEPS,
-        guidance_scale=5.0,
-        generator=_make_generator(),
-        callback_on_step_end=callback,
-        callback_on_step_end_tensor_inputs=["latents"],
-        output_type="pil",
-    )
-    return output.frames, collected
+    # 1. Encode text prompts
+    with torch.no_grad():
+        prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
+            prompt=prompts,
+            negative_prompt=[NEGATIVE_PROMPT] * batch_size,
+            device=device,
+        )
+
+    # 2. Full schedule, sliced to remaining steps if injecting
+    pipe.scheduler.set_timesteps(NUM_STEPS, device=device)
+    timesteps = pipe.scheduler.timesteps[step_offset:]
+    print(f"[_generate] step_offset={step_offset}, total_timesteps={len(pipe.scheduler.timesteps)}, running={len(timesteps)} steps")
+
+    # 3. Initialize latents — inject or sample fresh noise
+    if start_latent is not None:
+        latents = start_latent.to(device, dtype=dtype)
+    else:
+        lat_t = (NUM_FRAMES - 1) // 4 + 1          # VAE temporal stride = 4
+        lat_h = HEIGHT // 8                          # VAE spatial stride = 8
+        lat_w = WIDTH // 8
+        lat_c = pipe.transformer.config.in_channels  # 16 for Wan
+        latents = torch.randn(
+            (batch_size, lat_c, lat_t, lat_h, lat_w),
+            generator=_make_generator(),
+            device=device,
+            dtype=dtype,
+        )
+
+    # 4. Denoising loop — mirrors teacache t2v_generate
+    with torch.no_grad():
+        for i, t in enumerate(tqdm(timesteps, desc="denoising")):
+            latent_input = latents.to(dtype)
+            t_batch = t.expand(batch_size).to(dtype)
+
+            noise_pred_cond = pipe.transformer(
+                hidden_states=latent_input,
+                timestep=t_batch,
+                encoder_hidden_states=prompt_embeds.to(dtype),
+                return_dict=False,
+            )[0]
+
+            noise_pred_uncond = pipe.transformer(
+                hidden_states=latent_input,
+                timestep=t_batch,
+                encoder_hidden_states=negative_prompt_embeds.to(dtype),
+                return_dict=False,
+            )[0]
+
+            noise_pred = noise_pred_uncond + 5.0 * (noise_pred_cond - noise_pred_uncond)
+
+            latents = pipe.scheduler.step(
+                noise_pred.float(), t, latents.float(), return_dict=False
+            )[0].to(dtype)
+
+            original_step = step_offset + i + 1
+            if original_step in collect_set:
+                collected.append(latents.float().cpu().clone())
+
+    # 5. Decode latents → PIL frames, one video at a time to save VRAM
+    all_frames = []
+    with torch.no_grad():
+        for b in range(batch_size):
+            video = _vae_decode(latents[b:b+1].float())  # [1, C, T, H, W]
+            video = video.clamp(-1, 1).add(1).div(2)     # [0, 1]
+            video = (video[0].permute(1, 2, 3, 0) * 255).to(torch.uint8).cpu().numpy()
+            all_frames.append([Image.fromarray(frame) for frame in video])
+
+    return all_frames, collected
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -409,10 +470,12 @@ def _run_one_injection_pair(label, prompt_source, prompt_target, description):
     #    with source's step-k latent, then continue with target's text.
     latent_distances = {}
     for idx, inject_at_step in enumerate(INJECT_STEPS):
+        # Reuse the first inject_at_step steps from source by starting from
+        # the source's latent at that step and only running the remaining steps.
         inj_frames, _ = _generate(
             prompt_target,
-            inject_latent=source_latents[idx],   # shape [1, C, T, H, W]
-            inject_at_step=inject_at_step,
+            start_latent=source_latents[idx],   # shape [1, C, T, H, W]
+            start_step=inject_at_step,           # skip steps 1..inject_at_step
         )
         _save_video(inj_frames[0],
                     os.path.join(pair_dir, f"inject_step{inject_at_step:03d}.mp4"))
@@ -477,14 +540,172 @@ def run_exp2():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Experiment 3 — CLIP Text Similarity vs Denoising Latent Similarity
+# ══════════════════════════════════════════════════════════════════════════════
+
+VIDEOCLIP_MODEL_ID = "microsoft/xclip-base-patch32"
+
+def _encode_prompts_videoclip(prompts):
+    """Encode prompts with X-CLIP (video-language CLIP) text encoder. Returns L2-normalised [N, D]."""
+    tokenizer = XCLIPTokenizer.from_pretrained(VIDEOCLIP_MODEL_ID)
+    model = XCLIPTextModel.from_pretrained(VIDEOCLIP_MODEL_ID).to("cuda").eval()
+    with torch.no_grad():
+        tokens = tokenizer(prompts, padding=True, truncation=True,
+                           max_length=77, return_tensors="pt").to("cuda")
+        embeds = model(**tokens).pooler_output          # [N, D]
+        embeds = embeds / embeds.norm(dim=-1, keepdim=True)
+    model.cpu()
+    return embeds.float().cpu()
+
+
+def run_exp3(exp1_sim_path=None, exp1_pid_path=None):
+    """
+    Experiment 3: CLIP text similarity vs denoising latent similarity.
+
+    Two outputs:
+      (a) CLIP text similarity heatmap over all prompts, grouped by category.
+      (b) If exp1 data is available, Spearman correlation between the text
+          similarity matrix and the latent similarity matrix at each denoising
+          step — reveals at which step the video latent best reflects text semantics.
+
+    Args:
+      exp1_sim_path: path to exp1_sim_matrix.npy (optional, from run_exp1)
+      exp1_pid_path: path to exp1_pid_list.txt   (optional, from run_exp1)
+    """
+    print("\n" + "="*60)
+    print("Experiment 3: CLIP Text Similarity")
+    print("="*60)
+
+    # Collect all (pid, text) in the same order used by exp1
+    all_entries = [(pid, text)
+                   for entries in PROMPT_GROUPS.values()
+                   for pid, text in entries]
+    pids   = [e[0] for e in all_entries]
+    texts  = [e[1] for e in all_entries]
+    n      = len(pids)
+    pid_to_group = {pid: gid
+                    for gid, entries in PROMPT_GROUPS.items()
+                    for pid, _ in entries}
+
+    # ── 1. VideoCLIP (X-CLIP) text embeddings ───────────────────────────────
+    print(f"  Encoding {n} prompts with X-CLIP ({VIDEOCLIP_MODEL_ID})…")
+    embeds = _encode_prompts_videoclip(texts)     # [N, D], already L2-normalised
+
+    # Pairwise cosine similarity (dot product of unit vectors)
+    text_sim = (embeds @ embeds.T).numpy()        # [N, N]
+
+    # ── 2. Text similarity heatmap ───────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(max(8, n * 0.45), max(7, n * 0.4)))
+    im = ax.imshow(text_sim, vmin=-0.1, vmax=1.0, cmap="RdYlGn", aspect="auto")
+    plt.colorbar(im, ax=ax, label="Cosine similarity")
+    ax.set_xticks(range(n)); ax.set_xticklabels(pids, rotation=90, fontsize=7)
+    ax.set_yticks(range(n)); ax.set_yticklabels(pids, fontsize=7)
+
+    # Draw group boundary lines
+    group_sizes = [len(entries) for entries in PROMPT_GROUPS.values()]
+    boundaries = np.cumsum(group_sizes[:-1]) - 0.5
+    for b in boundaries:
+        ax.axhline(b, color="black", linewidth=1.2)
+        ax.axvline(b, color="black", linewidth=1.2)
+
+    # Annotate group labels on diagonal blocks
+    cursor = 0
+    for gid, entries in PROMPT_GROUPS.items():
+        mid = cursor + len(entries) / 2 - 0.5
+        ax.text(mid, -1.2, gid, ha="center", va="bottom", fontsize=6,
+                color="navy", fontweight="bold")
+        cursor += len(entries)
+
+    ax.set_title("X-CLIP (VideoCLIP) text embedding cosine similarity\n(grouped by prompt category)")
+    plt.tight_layout()
+    path = os.path.join(OUTPUT_DIR, "exp3_clip_text_similarity.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved text similarity heatmap → {path}")
+
+    # Save raw matrix
+    np.save(os.path.join(OUTPUT_DIR, "exp3_text_sim_matrix.npy"), text_sim)
+
+    # ── 3. Correlation with exp1 latent similarities (if available) ──────────
+    sim_path = exp1_sim_path or os.path.join(OUTPUT_DIR, "exp1_sim_matrix.npy")
+    pid_path = exp1_pid_path or os.path.join(OUTPUT_DIR, "exp1_pid_list.txt")
+
+    if not (os.path.exists(sim_path) and os.path.exists(pid_path)):
+        print("  [skip] exp1 data not found — run run_exp1() first for correlation plot.")
+        return
+
+    lat_sim = np.load(sim_path)   # [N, N, steps]
+    with open(pid_path) as f:
+        exp1_pids = [line.split("\t")[0] for line in f if line.strip()]
+
+    # Align ordering: exp1 may have a different pid order
+    try:
+        idx = [exp1_pids.index(p) for p in pids]
+    except ValueError as e:
+        print(f"  [skip] pid mismatch between exp1 and current PROMPT_GROUPS: {e}")
+        return
+    lat_sim = lat_sim[np.ix_(idx, idx)]   # reorder to match current pids
+
+    steps = lat_sim.shape[2]
+    # Upper-triangle mask (exclude diagonal — always 1.0 vs 1.0)
+    mask = np.triu(np.ones((n, n), dtype=bool), k=1)
+    text_vec = text_sim[mask]             # [N*(N-1)/2]
+
+    correlations = []
+    for s in range(steps):
+        lat_vec = lat_sim[:, :, s][mask]
+        rho, _ = spearmanr(text_vec, lat_vec)
+        correlations.append(rho)
+
+    # ── Plot: Spearman ρ vs denoising step ───────────────────────────────────
+    step_axis = list(range(1, steps + 1))
+    peak_step = int(np.argmax(correlations)) + 1
+    peak_rho  = correlations[peak_step - 1]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(step_axis, correlations, linewidth=2, color="steelblue")
+    ax.axvline(peak_step, color="tomato", linestyle="--", linewidth=1.5,
+               label=f"peak ρ={peak_rho:.3f} at step {peak_step}")
+    ax.set_xlabel(f"Denoising step (1 = highest noise, {steps} = final)")
+    ax.set_ylabel("Spearman ρ  (text sim vs latent sim)")
+    ax.set_title("How well does CLIP text similarity predict video latent similarity?\n"
+                 "Peak = step where latent space most faithfully mirrors text semantics")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    path = os.path.join(OUTPUT_DIR, "exp3_text_latent_correlation.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    print(f"  Saved text–latent correlation curve → {path}")
+    print(f"  Peak alignment: step {peak_step}  (ρ = {peak_rho:.3f})")
+
+    # ── Per-group breakdown ───────────────────────────────────────────────────
+    # Within each group: does within-group text sim rank match within-group latent rank?
+    print("\n  Per-group CLIP vs latent correlation (at peak step):")
+    for gid, entries in PROMPT_GROUPS.items():
+        g_pids = [p for p, _ in entries]
+        if len(g_pids) < 3:
+            continue
+        g_idx  = [pids.index(p) for p in g_pids]
+        g_mask = np.triu(np.ones((len(g_idx), len(g_idx)), bool), k=1)
+        g_text = text_sim[np.ix_(g_idx, g_idx)][g_mask]
+        g_lat  = lat_sim[np.ix_(g_idx, g_idx), peak_step - 1].squeeze()[g_mask]
+        if g_text.std() < 1e-6:
+            print(f"    [{gid}] skipped (zero variance in text sim)")
+            continue
+        rho, _ = spearmanr(g_text, g_lat)
+        print(f"    [{gid}]  ρ = {rho:.3f}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp", choices=["1", "2", "both"], default="both",
-                        help="1=similarity curve, 2=injection test, both=run all")
+    parser.add_argument("--exp", choices=["1", "2", "3", "both"], default="both",
+                        help="1=similarity curve, 2=injection test, 3=clip text sim, both=run all")
     parser.add_argument("--groups", nargs="*", default=None,
                         help="Subset of group IDs to run for exp1, e.g. --groups A_attribute E_causal")
     args = parser.parse_args()
@@ -501,5 +722,7 @@ if __name__ == "__main__":
         run_exp1()
     if args.exp in ("2", "both"):
         run_exp2()
+    if args.exp in ("3", "both"):
+        run_exp3()
 
     print(f"\nAll outputs saved to: {OUTPUT_DIR}/")
