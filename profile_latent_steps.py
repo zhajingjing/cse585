@@ -41,7 +41,7 @@ from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 # Path to the downloaded Wan2.1-T2V-1.3B checkpoint directory
-CKPT_DIR   = os.path.join(os.path.dirname(__file__), "Wan2.1-T2V-1.3B")
+CKPT_DIR   = "/root/autodl-tmp/Wan2.1-T2V-1.3B"
 NUM_STEPS  = 50
 HEIGHT     = 480
 WIDTH      = 832
