@@ -159,25 +159,43 @@ class WanSelfAttention(nn.Module):
             s_ref = h_ref.shape[1]
             k = self.norm_k(self.k(h_ref)).view(1, s_ref, n, d)
             v = self.v(h_ref).view(1, s_ref, n, d)
+            # Rescale K to match Q's std to prevent attention collapse caused by
+            # distribution mismatch (K from clean ref latent, Q from noisy target).
+            q_std = q.float().std().clamp(min=1e-6)
+            k_std = k.float().std().clamp(min=1e-6)
+            k = k * (q_std / k_std)
             k_final = rope_apply(k, grid_sizes[:1], freqs)
             v_final = v
             if b > 1:
                 k_final = k_final.expand(b, -1, -1, -1).contiguous()
                 v_final = v_final.expand(b, -1, -1, -1).contiguous()
 
-            # ── Compute & save attention map [B, n_heads, s_q, s_k] ─────────
+            # ── Attention statistics via row-wise sampling (avoids OOM) ──────
+            # Full [B, n_heads, s_q, s_k] would be ~9 GB; sample 256 query
+            # positions instead and compute softmax only for those rows.
             with torch.no_grad():
                 scale = d ** -0.5
-                # q_rope/k_final: [B, s, n, d] → transpose to [B, n, s, d]
-                attn_w = torch.einsum('bqnd,bknd->bnqk',
-                                      q_rope.float(), k_final.float()) * scale
-                attn_w = attn_w.softmax(dim=-1)   # [B, n_heads, s_q, s_k]
+                s_q = q_rope.size(1)
+                s_k = k_final.size(1)
+                n_sample = min(256, s_q)
+                idx = torch.randperm(s_q, device=q_rope.device)[:n_sample]
+                q_s = q_rope[:, idx].float()          # [B, n_sample, n, d]
+                k_s = k_final.float()                  # [B, s_k,     n, d]
+                # logits: [B, n, n_sample, s_k]
+                logits = torch.einsum('bqnd,bknd->bnqk', q_s, k_s) * scale
+                attn_s = logits.softmax(dim=-1)
+                # entropy per row: -sum(p log p), averaged over heads/samples
+                entropy = -(attn_s * attn_s.clamp(min=1e-9).log()).sum(-1).mean()
+                max_w   = attn_s.max().item()
+                mean_w  = attn_s.mean().item()
+                std_w   = attn_s.std().item()
             self._chai_attn_step += 1
             step = self._chai_attn_step
-            print(f"[CHAI-attn] inject step {step}  shape={list(attn_w.shape)}  "
-                  f"mean={attn_w.mean():.4f}  std={attn_w.std():.4f}  "
-                  f"max={attn_w.max():.4f}")
-            torch.save(attn_w.cpu(), f"chai_attn_step{step}.pt")
+            print(f"[CHAI-attn] inject step {step}  s_q={s_q} s_k={s_k} "
+                  f"(sampled {n_sample} queries)  "
+                  f"mean={mean_w:.4f}  std={std_w:.4f}  max={max_w:.4f}  "
+                  f"entropy={entropy:.3f}  "
+                  f"(uniform entropy={float(__import__('math').log(s_k)):.3f})")
         else:
             # Normal mode: Q, K, V all from the current latent.
             k = self.norm_k(self.k(x)).view(b, s, n, d)
