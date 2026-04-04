@@ -27,14 +27,21 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
-from diffusers import AutoencoderKLWan, WanPipeline
 from tqdm import tqdm
 from transformers import XCLIPTokenizer, XCLIPTextModel
 from scipy.stats import spearmanr
 
+import sys, math
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "Wan2.1"))
+from wan.text2video import WanT2V
+from wan.configs import WAN_CONFIGS
+from wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
+from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-MODEL_ID   = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+# Path to the downloaded Wan2.1-T2V-1.3B checkpoint directory
+CKPT_DIR   = os.path.join(os.path.dirname(__file__), "Wan2.1-T2V-1.3B")
 NUM_STEPS  = 50
 HEIGHT     = 480
 WIDTH      = 832
@@ -159,11 +166,25 @@ INJECT_STEPS = [1, 5, 10, 15, 20, 25, 30, 40]
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── Build pipeline ─────────────────────────────────────────────────────────────
-# VAE must be float32 for decode quality; transformer runs in bfloat16.
+# Use the original Wan2.1 pipeline directly from the cloned repo.
+# WanT2V loads T5, VAE, and WanModel (our modified version with CHAI support).
 
-vae = AutoencoderKLWan.from_pretrained(MODEL_ID, subfolder="vae", torch_dtype=torch.float32)
-pipe = WanPipeline.from_pretrained(MODEL_ID, vae=vae, torch_dtype=torch.bfloat16)
-pipe.to("cuda")
+cfg      = WAN_CONFIGS["t2v-1.3B"]
+pipeline = WanT2V(cfg, checkpoint_dir=CKPT_DIR, device_id=0, rank=0)
+model    = pipeline.model          # WanModel — CHAI methods live here
+vae      = pipeline.vae            # WanVAE
+device   = torch.device("cuda:0")
+
+# Latent shape constants derived from config
+_VAE_STRIDE  = cfg.vae_stride                  # (4, 8, 8)
+_PATCH_SIZE  = cfg.patch_size                  # (1, 2, 2)
+_Z_DIM       = vae.model.z_dim                 # 16
+_F_LAT       = (NUM_FRAMES - 1) // _VAE_STRIDE[0] + 1          # 9
+_H_LAT       = HEIGHT  // _VAE_STRIDE[1]                        # 60
+_W_LAT       = WIDTH   // _VAE_STRIDE[2]                        # 104
+SEQ_LEN      = math.ceil((_H_LAT * _W_LAT) /
+                          (_PATCH_SIZE[1] * _PATCH_SIZE[2]) *
+                          _F_LAT)               # 14040
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -177,115 +198,359 @@ def _save_video(frames, path):
     imageio.mimwrite(path, [np.array(f, dtype=np.uint8) for f in frames], fps=FPS)
 
 
-def _vae_decode(latents):
-    """Denormalize latents and decode through VAE. Returns [B, C, T, H, W] in [-1, 1]."""
-    lat_mean = torch.tensor(pipe.vae.config.latents_mean, device=latents.device, dtype=latents.dtype).view(1, -1, 1, 1, 1)
-    lat_std  = torch.tensor(pipe.vae.config.latents_std,  device=latents.device, dtype=latents.dtype).view(1, -1, 1, 1, 1)
-    z = latents * lat_std + lat_mean  # inverse of (x - mean) / std
-    return pipe.vae.decode(z).sample
+def _vae_decode_single(latent):
+    """Decode one [C, F, H, W] latent (float32). Returns [C, F, H, W] in [-1, 1]."""
+    return vae.decode([latent.to(device, dtype=torch.float32)])[0]  # [C, F, H, W]
 
 
 def latent_to_thumb(z, size=(128, 72)):
-    """Decode a single [C, T, H, W] latent tensor to a PIL thumbnail (first frame)."""
-    z = z.unsqueeze(0).to(pipe.device, dtype=torch.float32)
+    """Decode a single [C, F, H, W] latent to a PIL thumbnail of the first frame."""
     with torch.no_grad():
-        video = _vae_decode(z)
-    video = video.clamp(-1, 1).add(1).div(2)  # [0, 1]
-    frame = video[0, :, 0].permute(1, 2, 0).float().cpu().numpy()
+        video = _vae_decode_single(z)  # [C, F, H, W], [-1, 1]
+    video = video.clamp(-1, 1).add(1).div(2)   # [0, 1]
+    frame = video[:, 0].permute(1, 2, 0).float().cpu().numpy()
     frame = (frame * 255).clip(0, 255).astype(np.uint8)
     return Image.fromarray(frame).resize(size, Image.LANCZOS)
 
 
-def _generate(prompts, collect_steps=None, start_latent=None, start_step=None):
+def _build_phased_timesteps(full_timesteps, start_step,
+                             micro_len=3, micro_subdivide=3):
     """
-    Explicit denoising loop (teacache-style) that handles:
-      - batched prompts (str or list[str])
-      - latent collection at specified 1-based steps
-      - skipping the first k steps by providing a starting latent and step index
-        (start_latent: Tensor[B, C, T, H, W], start_step: 1-based step to resume from)
+    Construct a non-uniform timestep array for post-injection denoising with the
+    SAME total step count as the original remaining timesteps, but redistributed
+    so early Δt is small and later Δt is large.
+
+    Phase 2 — micro correction (first micro_len original intervals after injection):
+        Each original interval [t_i → t_{i+1}] is subdivided into micro_subdivide
+        equal sub-intervals. Uses n_micro * micro_subdivide steps total.
+
+    Phase 3 — coarse steps (remainder of range):
+        The remaining step budget (N - phase2_steps) is spread uniformly over
+        [t_boundary → t_end], giving proportionally larger Δt. No steps are skipped.
+
+    Total steps == len(remaining) - 1, identical to the original schedule.
+
+    Args:
+        full_timesteps : 1-D tensor from scheduler.set_timesteps, values high→low.
+        start_step     : number of steps already done (injection index).
+        micro_len      : number of original intervals in micro phase (default 3).
+        micro_subdivide: sub-divisions per micro interval (default 3 → Δt/3).
+
+    Returns 1-D float tensor — the complete timestep array to drive the loop.
+    """
+    remaining = full_timesteps[start_step:]   # values we still need to cover
+
+    if start_step == 0 or len(remaining) <= micro_len + 1:
+        return remaining
+
+    N = len(remaining) - 1                          # total original intervals
+    n_micro = min(micro_len, N)                     # how many intervals to subdivide
+    phase2_steps = n_micro * micro_subdivide        # steps consumed by phase 2
+    phase3_steps = N - phase2_steps                 # steps left for phase 3
+
+    if phase3_steps <= 0:
+        return remaining
+
+    # ── Phase 2: dense sub-steps inside each micro interval ──────────────────
+    phase2 = []
+    for i in range(n_micro):
+        t_hi = remaining[i].item()
+        t_lo = remaining[i + 1].item()
+        for sub in range(micro_subdivide):
+            phase2.append(t_hi + (t_lo - t_hi) * (sub / micro_subdivide))
+    t_boundary = remaining[n_micro].item()
+    phase2.append(t_boundary)                       # exact boundary anchor
+
+    # ── Phase 3: uniform steps consuming the leftover budget ─────────────────
+    # Spread phase3_steps steps from t_boundary to t_end; Δt is larger to
+    # compensate for the dense phase 2 — but NO steps are skipped overall.
+    t_end = remaining[-1].item()
+    phase3 = [t_boundary + (t_end - t_boundary) * (j / phase3_steps)
+              for j in range(phase3_steps + 1)]
+
+    # Combine — drop the shared boundary point that ends phase2 / starts phase3
+    timesteps = torch.tensor(phase2 + phase3[1:],
+                             dtype=remaining.dtype, device=remaining.device)
+
+    # ── Print actual timestep values and Δt per phase ─────────────────────────
+    p2 = phase2
+    p3 = phase3
+    dt_p2 = [f"{abs(p2[i+1]-p2[i]):.2f}" for i in range(len(p2)-1)]
+    dt_p3 = [f"{abs(p3[i+1]-p3[i]):.2f}" for i in range(len(p3)-1)]
+    print(f"  [phase2 timesteps] {[round(v,3) for v in p2]}")
+    print(f"  [phase2 Δt]        {dt_p2}")
+    print(f"  [phase3 timesteps] {[round(v,3) for v in p3]}")
+    print(f"  [phase3 Δt]        {dt_p3}")
+    print(f"  [summary] inject@{start_step} | "
+          f"phase2: {len(p2)-1} steps (÷{micro_subdivide}) | "
+          f"phase3: {len(p3)-1} steps (uniform stretch) | "
+          f"total {len(timesteps)} == {len(remaining)-1} original remaining | "
+          f"endpoint={timesteps[-1].item():.4f} (exact={remaining[-1].item():.4f})")
+    return timesteps
+
+
+def _make_scheduler():
+    """Create a fresh FlowUniPCMultistepScheduler with standard Wan2.1 settings."""
+    sched = FlowUniPCMultistepScheduler(
+        num_train_timesteps=cfg.num_train_timesteps,
+        shift=1,
+        use_dynamic_shifting=False,
+    )
+    sched.set_timesteps(NUM_STEPS, device=device, shift=5.0)
+    return sched
+
+
+def _encode_text(prompts):
+    """Encode a list of strings with T5. Returns list of [L, C] tensors on device."""
+    pipeline.text_encoder.model.to(device)
+    ctx = pipeline.text_encoder(prompts, device)
+    pipeline.text_encoder.model.cpu()
+    return ctx
+
+
+def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
+              micro_len=3, micro_subdivide=3, chai_inject=False):
+    """
+    Denoising loop using the original Wan2.1 WanModel directly.
+
+      prompts      — str or list[str]
+      collect_steps— 1-based step numbers at which to save the latent
+      start_latent — Tensor[B, C, F, H, W] to resume from (Exp 2 injection)
+      start_step   — int, how many steps already done (used with start_latent)
+      chai_inject  — bool: use CHAI K/V injection on the conditional pass
 
     Returns:
       frames    — list[list[PIL.Image]], one inner list per prompt
-      collected — list of Tensor[B, C, T, H, W] (cpu float32), one per collected step
+      collected — list of Tensor[B, C, F, H, W] (cpu float32), one per step
     """
     if isinstance(prompts, str):
         prompts = [prompts]
-    batch_size = len(prompts)
-    collected = []
+    B = len(prompts)
     collect_set = set(collect_steps) if collect_steps else set()
     step_offset = start_step if start_step is not None else 0
+    collected   = []
 
-    device = pipe.device
-    dtype = torch.bfloat16
+    # 1. Text encoding
+    context      = _encode_text(prompts)
+    context_null = _encode_text([NEGATIVE_PROMPT] * B)
 
-    # 1. Encode text prompts
-    with torch.no_grad():
-        prompt_embeds, negative_prompt_embeds = pipe.encode_prompt(
-            prompt=prompts,
-            negative_prompt=[NEGATIVE_PROMPT] * batch_size,
-            device=device,
-        )
-
-    # 2. Full schedule, sliced to remaining steps if injecting
-    pipe.scheduler.set_timesteps(NUM_STEPS, device=device)
-    timesteps = pipe.scheduler.timesteps[step_offset:]
-    print(f"[_generate] step_offset={step_offset}, total_timesteps={len(pipe.scheduler.timesteps)}, running={len(timesteps)} steps")
-
-    # 3. Initialize latents — inject or sample fresh noise
-    if start_latent is not None:
-        latents = start_latent.to(device, dtype=dtype)
+    # 2. Timestep schedule
+    scheduler   = _make_scheduler()
+    full_ts     = scheduler.timesteps            # high → low, length NUM_STEPS
+    if start_step is not None:
+        timesteps = _build_phased_timesteps(
+            full_ts, step_offset, micro_len=micro_len,
+            micro_subdivide=micro_subdivide)
     else:
-        lat_t = (NUM_FRAMES - 1) // 4 + 1          # VAE temporal stride = 4
-        lat_h = HEIGHT // 8                          # VAE spatial stride = 8
-        lat_w = WIDTH // 8
-        lat_c = pipe.transformer.config.in_channels  # 16 for Wan
-        latents = torch.randn(
-            (batch_size, lat_c, lat_t, lat_h, lat_w),
-            generator=_make_generator(),
-            device=device,
-            dtype=dtype,
-        )
+        timesteps = full_ts
+        print(f"[_generate] full generation — {len(timesteps)} steps")
 
-    # 4. Denoising loop — mirrors teacache t2v_generate
-    with torch.no_grad():
+    # 3. Initialize latents: list of B tensors [C, F_lat, H_lat, W_lat]
+    seed_g = _make_generator()
+    if start_latent is not None:
+        # Accept Tensor[B, C, F, H, W] from old Exp-2 API
+        latents = [start_latent[j].to(device, dtype=torch.float32)
+                   for j in range(start_latent.shape[0])]
+    else:
+        latents = [
+            torch.randn(_Z_DIM, _F_LAT, _H_LAT, _W_LAT,
+                        dtype=torch.float32, device=device, generator=seed_g)
+            for _ in range(B)
+        ]
+
+    # 4. Denoising loop
+    with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
         for i, t in enumerate(tqdm(timesteps, desc="denoising")):
-            latent_input = latents.to(dtype)
-            t_batch = t.expand(batch_size).to(dtype)
+            t_tensor = torch.stack([t] * B)   # [B]
 
-            noise_pred_cond = pipe.transformer(
-                hidden_states=latent_input,
-                timestep=t_batch,
-                encoder_hidden_states=prompt_embeds.to(dtype),
-                return_dict=False,
-            )[0]
+            # Conditional pass — CHAI inject active here only:
+            # K, V come from reference final latent; Q from current noisy target.
+            if chai_inject:
+                model.chai_inject_mode(True)
+            noise_preds_cond = model(
+                latents, t=t_tensor, context=context, seq_len=SEQ_LEN)
+            if chai_inject:
+                model.chai_inject_mode(False)
 
-            noise_pred_uncond = pipe.transformer(
-                hidden_states=latent_input,
-                timestep=t_batch,
-                encoder_hidden_states=negative_prompt_embeds.to(dtype),
-                return_dict=False,
-            )[0]
+            # Unconditional pass — no CHAI so CFG guidance stays target-only
+            noise_preds_null = model(
+                latents, t=t_tensor, context=context_null, seq_len=SEQ_LEN)
 
-            noise_pred = noise_pred_uncond + 5.0 * (noise_pred_cond - noise_pred_uncond)
+            # CFG + latent update
+            stacked     = torch.stack(latents)                    # [B, C, F, H, W]
+            noise_pred  = torch.stack([
+                noise_preds_null[j] + 5.0 * (noise_preds_cond[j] - noise_preds_null[j])
+                for j in range(B)
+            ])                                                     # [B, C, F, H, W]
 
-            latents = pipe.scheduler.step(
-                noise_pred.float(), t, latents.float(), return_dict=False
-            )[0].to(dtype)
+            if start_step is not None:
+                # Euler step for phased/non-uniform schedule (Exp 2 injection)
+                t_scale = float(cfg.num_train_timesteps)
+                t_next  = timesteps[i + 1] if i + 1 < len(timesteps) \
+                          else torch.zeros_like(t)
+                dt       = (t_next - t).float() / t_scale
+                updated  = (stacked.float() + noise_pred.float() * dt)
+            else:
+                updated = scheduler.step(
+                    noise_pred, t, stacked,
+                    return_dict=False)[0].float()                  # [B, C, F, H, W]
 
-            original_step = step_offset + i + 1
-            if original_step in collect_set:
-                collected.append(latents.float().cpu().clone())
+            latents = list(updated.unbind(0))   # list of B [C, F, H, W] tensors
 
-    # 5. Decode latents → PIL frames, one video at a time to save VRAM
+            step_num = step_offset + i + 1
+            if step_num in collect_set:
+                collected.append(updated.float().cpu().clone())    # [B, C, F, H, W]
+
+    # 5. Decode latents → PIL frames
     all_frames = []
     with torch.no_grad():
-        for b in range(batch_size):
-            video = _vae_decode(latents[b:b+1].float())  # [1, C, T, H, W]
-            video = video.clamp(-1, 1).add(1).div(2)     # [0, 1]
-            video = (video[0].permute(1, 2, 3, 0) * 255).to(torch.uint8).cpu().numpy()
+        for j in range(B):
+            video = _vae_decode_single(latents[j].float())   # [C, F, H, W], [-1,1]
+            video = video.clamp(-1, 1).add(1).div(2)         # [0, 1]
+            video = (video.permute(1, 2, 3, 0) * 255).to(torch.uint8).cpu().numpy()
             all_frames.append([Image.fromarray(frame) for frame in video])
 
     return all_frames, collected
+
+
+def _generate_chai(target_prompts, reference_prompt: str, **generate_kwargs):
+    """
+    CHAI-style generation: use reference_prompt's FINAL latent K, V in every
+    self-attention layer of the target denoising loop (Q from target noisy latent).
+
+    Steps:
+      1. Fully generate reference_prompt → collect final clean latent z_ref.
+      2. Encode reference text → context_ref.
+      3. Call model.chai_capture_reference() — one forward pass on z_ref at the
+         final (near-clean) timestep; WanSelfAttention stores K, V in-model.
+      4. Generate target_prompts with chai_inject=True.
+    """
+    print(f"\n[CHAI] Step 1 — generate reference: '{reference_prompt}'")
+    _, ref_lat_list = _generate(reference_prompt, collect_steps=[NUM_STEPS])
+    # ref_lat_list[0] shape: [B=1, C, F, H, W]; take the single-prompt tensor
+    z_ref = ref_lat_list[0][0]   # [C, F, H, W], cpu float32
+
+    print("[CHAI] Step 2 — encode reference text")
+    context_ref = _encode_text([reference_prompt])   # list of 1 tensor [L, C]
+
+    print("[CHAI] Step 3 — capture K/V from reference final latent")
+    # Use the final (smallest) scheduled timestep so model sees near-clean signal
+    t_final = _make_scheduler().timesteps[-1]
+    t_ref   = torch.stack([t_final])               # [1]
+    model.chai_capture_reference(
+        x_ref=[z_ref.to(device, dtype=torch.bfloat16)],
+        t_ref=t_ref.to(device),
+        context_ref=context_ref,
+        seq_len=SEQ_LEN,
+    )
+
+    print("[CHAI] Step 4 — generate target with CHAI injection")
+    try:
+        return _generate(target_prompts, chai_inject=True, **generate_kwargs)
+    finally:
+        model.chai_clear_kv()   # remove stored K/V so normal generation is unaffected
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Experiment 4 — CHAI Cross-Prompt Attention Steering
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Pairs: (label, reference_prompt, target_prompt)
+# Reference provides the structural/visual anchor (K, V from its final latent).
+# Target text drives semantics. Outputs are compared to the target baseline.
+CHAI_PAIRS = [
+    ("colour_swap",
+     "a white horse galloping across a green meadow",
+     "a brown horse galloping across a green meadow"),
+    ("subject_swap",
+     "a golden retriever running through a park",
+     "a grey wolf running through a park"),
+    ("motion_transfer",
+     "a waterfall cascading down a rocky cliff",
+     "a waterfall frozen in ice on a rocky cliff"),
+    ("unrelated",
+     "a brown horse galloping across a green meadow",
+     "a rocket launching into a starry night sky"),
+]
+
+
+def run_exp4_chai():
+    """
+    Experiment 4: CHAI-style self-attention injection.
+
+    For each (reference, target) pair:
+      - Baseline: generate target from scratch.
+      - CHAI:     generate target with K, V from reference final latent.
+      - Compute per-frame L2 and cosine similarity between CHAI and baseline
+        first frames to quantify how much the reference structural prior bleeds
+        into the target output.
+
+    Saves side-by-side comparison videos and a summary bar chart.
+    """
+    print("\n" + "=" * 60)
+    print("Experiment 4: CHAI Cross-Prompt Attention Steering")
+    print("=" * 60)
+
+    exp4_dir = os.path.join(OUTPUT_DIR, "exp4_chai")
+    os.makedirs(exp4_dir, exist_ok=True)
+
+    results = {}  # label → {"l2": float, "cos": float}
+
+    for label, ref_prompt, tgt_prompt in CHAI_PAIRS:
+        pair_dir = os.path.join(exp4_dir, label)
+        os.makedirs(pair_dir, exist_ok=True)
+
+        print(f"\n  [{label}]")
+        print(f"    Reference: '{ref_prompt}'")
+        print(f"    Target:    '{tgt_prompt}'")
+
+        # Baseline — target generated without any CHAI influence
+        print("    → Baseline generation …")
+        baseline_frames, _ = _generate(tgt_prompt)
+        _save_video(baseline_frames[0], os.path.join(pair_dir, "baseline.mp4"))
+
+        # CHAI — target steered by reference K, V
+        print("    → CHAI generation …")
+        chai_frames, _ = _generate_chai(tgt_prompt, reference_prompt=ref_prompt)
+        _save_video(chai_frames[0], os.path.join(pair_dir, "chai.mp4"))
+
+        # Quantify deviation of CHAI output from baseline on first frame
+        b_arr = np.array(baseline_frames[0][0], dtype=np.float32).flatten()
+        c_arr = np.array(chai_frames[0][0],    dtype=np.float32).flatten()
+        l2  = float(np.linalg.norm(c_arr - b_arr))
+        cos = float(np.dot(b_arr, c_arr) / (np.linalg.norm(b_arr) * np.linalg.norm(c_arr) + 1e-8))
+        results[label] = {"l2": l2, "cos": cos}
+        print(f"    first-frame L2={l2:.1f}  cos={cos:.4f}")
+
+    # ── Summary bar chart ─────────────────────────────────────────────────────
+    labels  = list(results.keys())
+    l2_vals = [results[lb]["l2"]  for lb in labels]
+    cos_vals= [results[lb]["cos"] for lb in labels]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    x = np.arange(len(labels))
+
+    ax1.bar(x, l2_vals, color="steelblue")
+    ax1.set_xticks(x); ax1.set_xticklabels(labels, rotation=20, ha="right")
+    ax1.set_ylabel("First-frame L2  (CHAI vs baseline)")
+    ax1.set_title("CHAI structural bleed-in (L2)\nHigher = more reference influence")
+    ax1.grid(axis="y", alpha=0.3)
+
+    ax2.bar(x, cos_vals, color="darkorange")
+    ax2.set_xticks(x); ax2.set_xticklabels(labels, rotation=20, ha="right")
+    ax2.set_ylabel("First-frame cosine similarity  (CHAI vs baseline)")
+    ax2.set_title("CHAI structural alignment (cosine)\nLower = more deviation from baseline")
+    ax2.set_ylim(0, 1)
+    ax2.grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Experiment 4: CHAI cross-prompt self-attention injection\n"
+                 "Reference K/V (final latent) injected into target self-attention Q", fontsize=11)
+    plt.tight_layout()
+    path = os.path.join(exp4_dir, "chai_summary.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"\n  Saved CHAI summary chart → {path}")
+    return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -704,8 +969,8 @@ def run_exp3(exp1_sim_path=None, exp1_pid_path=None):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp", choices=["1", "2", "3", "both"], default="both",
-                        help="1=similarity curve, 2=injection test, 3=clip text sim, both=run all")
+    parser.add_argument("--exp", choices=["1", "2", "3", "4", "both"], default="both",
+                        help="1=similarity curve, 2=injection test, 3=clip text sim, 4=chai attention, both=run all")
     parser.add_argument("--groups", nargs="*", default=None,
                         help="Subset of group IDs to run for exp1, e.g. --groups A_attribute E_causal")
     args = parser.parse_args()
@@ -724,5 +989,7 @@ if __name__ == "__main__":
         run_exp2()
     if args.exp in ("3", "both"):
         run_exp3()
+    if args.exp in ("4", "both"):
+        run_exp4_chai()
 
     print(f"\nAll outputs saved to: {OUTPUT_DIR}/")
