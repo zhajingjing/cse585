@@ -641,7 +641,7 @@ class WanModel(ModelMixin, ConfigMixin):
             z_ref : [C, F, H, W] float32 tensor — the fully denoised reference
                     latent (output of 50-step generation).
         """
-        with torch.no_grad():
+        with torch.no_grad(), amp.autocast(dtype=torch.bfloat16):
             # Patch-embed: [C,F,H,W] → [1,C,F_p,H_p,W_p] → [1, L, dim]
             h = self.patch_embedding(z_ref.unsqueeze(0))   # [1, dim, F_p, H_p, W_p]
             h = h.flatten(2).transpose(1, 2)               # [1, L, dim]
