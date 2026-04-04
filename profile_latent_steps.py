@@ -484,14 +484,16 @@ def run_exp4b_self_inject(prompt=None, num_steps=8, inject_steps=(2, 3, 4)):
     captured_hiddens = {}   # {inject_call_num: tensor [1, L, dim]}
     _current_step    = [0]
 
-    def _block0_hook(_module, _input, output):
-        # output is x after block 0: [B, L, dim]
+    def _block0_hook(_module, input, _output):
+        # input[0] is x going INTO block 0: [B, L, dim]
+        # This matches what self.k(x) uses in the normal (non-CHAI) path.
         step = _current_step[0]
         if step in inject_set:
             call_num = inject_sorted.index(step) + 1  # 1-based
-            captured_hiddens[call_num] = output.detach().cpu()
+            x_in = input[0]
+            captured_hiddens[call_num] = x_in.detach().cpu()
             print(f"  [capture] step={step} → inject_call={call_num}  "
-                  f"shape={output.shape}  std={output.float().std():.4f}")
+                  f"shape={x_in.shape}  std={x_in.float().std():.4f}")
 
     # ── Pass 1: baseline, capture block-0 output at inject steps ─────────────
     print("\n[Pass 1] Baseline generation + capture block-0 hidden states")
