@@ -27,9 +27,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
-from tqdm import tqdm
-from transformers import XCLIPTokenizer, XCLIPTextModel
-from scipy.stats import spearmanr
+# from tqdm import tqdm
+# from transformers import XCLIPTokenizer, XCLIPTextModel
+# from scipy.stats import spearmanr
 
 import sys, math
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "Wan2.1"))
@@ -289,14 +289,14 @@ def _build_phased_timesteps(full_timesteps, start_step,
     return timesteps
 
 
-def _make_scheduler():
+def _make_scheduler(num_steps=NUM_STEPS):
     """Create a fresh FlowUniPCMultistepScheduler with standard Wan2.1 settings."""
     sched = FlowUniPCMultistepScheduler(
         num_train_timesteps=cfg.num_train_timesteps,
         shift=1,
         use_dynamic_shifting=False,
     )
-    sched.set_timesteps(NUM_STEPS, device=device, shift=5.0)
+    sched.set_timesteps(num_steps, device=device, shift=5.0)
     return sched
 
 
@@ -309,7 +309,7 @@ def _encode_text(prompts):
 
 
 def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
-              micro_len=3, micro_subdivide=3, chai_inject=False):
+              micro_len=3, micro_subdivide=3, chai_inject=False, num_steps=NUM_STEPS):
     """
     Denoising loop using the original Wan2.1 WanModel directly.
 
@@ -335,7 +335,7 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
     context_null = _encode_text([NEGATIVE_PROMPT] * B)
 
     # 2. Timestep schedule
-    scheduler   = _make_scheduler()
+    scheduler   = _make_scheduler(num_steps)
     full_ts     = scheduler.timesteps            # high → low, length NUM_STEPS
     if start_step is not None:
         timesteps = _build_phased_timesteps(
@@ -413,7 +413,8 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
     return all_frames, collected
 
 
-def _generate_chai(target_prompts, reference_prompt: str, **generate_kwargs):
+def _generate_chai(target_prompts, reference_prompt: str, num_steps=NUM_STEPS,
+                   **generate_kwargs):
     """
     CHAI-style generation: use reference_prompt's FINAL latent K, V in every
     self-attention layer of the target denoising loop (Q from target noisy latent).
@@ -425,8 +426,9 @@ def _generate_chai(target_prompts, reference_prompt: str, **generate_kwargs):
          final (near-clean) timestep; WanSelfAttention stores K, V in-model.
       4. Generate target_prompts with chai_inject=True.
     """
-    print(f"\n[CHAI] Step 1 — generate reference: '{reference_prompt}'")
-    _, ref_lat_list = _generate(reference_prompt, collect_steps=[NUM_STEPS])
+    print(f"\n[CHAI] Step 1 — generate reference (50 steps): '{reference_prompt}'")
+    _, ref_lat_list = _generate(reference_prompt, collect_steps=[NUM_STEPS],
+                                num_steps=NUM_STEPS)
     # ref_lat_list[0] shape: [B=1, C, F, H, W]; take the single-prompt tensor
     z_ref = ref_lat_list[0][0]   # [C, F, H, W], cpu float32
 
@@ -446,7 +448,8 @@ def _generate_chai(target_prompts, reference_prompt: str, **generate_kwargs):
 
     print("[CHAI] Step 4 — generate target with CHAI injection")
     try:
-        return _generate(target_prompts, chai_inject=True, **generate_kwargs)
+        return _generate(target_prompts, chai_inject=True, num_steps=num_steps,
+                         **generate_kwargs)
     finally:
         model.chai_clear_kv()   # remove stored K/V so normal generation is unaffected
 
@@ -504,47 +507,59 @@ def run_exp4_chai():
         print(f"    Reference: '{ref_prompt}'")
         print(f"    Target:    '{tgt_prompt}'")
 
-        # Baseline — target generated without any CHAI influence
-        print("    → Baseline generation …")
-        baseline_frames, _ = _generate(tgt_prompt)
+        # Baseline — 8-step target generation without CHAI
+        print("    → Baseline generation (8 steps) …")
+        baseline_frames, baseline_lats = _generate(tgt_prompt, num_steps=8,
+                                                    collect_steps=[8])
         _save_video(baseline_frames[0], os.path.join(pair_dir, "baseline.mp4"))
 
-        # CHAI — target steered by reference K, V
-        print("    → CHAI generation …")
-        chai_frames, _ = _generate_chai(tgt_prompt, reference_prompt=ref_prompt)
+        # CHAI — 8-step target steered by reference K, V (from 50-step ref latent)
+        print("    → CHAI generation (8 steps) …")
+        chai_frames, chai_lats = _generate_chai(tgt_prompt, reference_prompt=ref_prompt,
+                                                num_steps=8, collect_steps=[8])
         _save_video(chai_frames[0], os.path.join(pair_dir, "chai.mp4"))
 
-        # Quantify deviation of CHAI output from baseline on first frame
-        b_arr = np.array(baseline_frames[0][0], dtype=np.float32).flatten()
-        c_arr = np.array(chai_frames[0][0],    dtype=np.float32).flatten()
-        l2  = float(np.linalg.norm(c_arr - b_arr))
-        cos = float(np.dot(b_arr, c_arr) / (np.linalg.norm(b_arr) * np.linalg.norm(c_arr) + 1e-8))
-        results[label] = {"l2": l2, "cos": cos}
-        print(f"    first-frame L2={l2:.1f}  cos={cos:.4f}")
+        # ── Metrics ──────────────────────────────────────────────────────────
+        # Latent-space cosine similarity: compare final latents (before decode)
+        # More meaningful than pixel cosine — captures structure, not just colour.
+        b_lat = baseline_lats[0][0].flatten().float()   # [C*F*H*W]
+        c_lat = chai_lats[0][0].flatten().float()
+        lat_cos = torch.nn.functional.cosine_similarity(
+            b_lat.unsqueeze(0), c_lat.unsqueeze(0)).item()
+
+        # Pixel L2 on first frame (how visually different the outputs look)
+        b_px = np.array(baseline_frames[0][0], dtype=np.float32).flatten()
+        c_px = np.array(chai_frames[0][0],     dtype=np.float32).flatten()
+        px_l2 = float(np.linalg.norm(c_px - b_px))
+
+        results[label] = {"lat_cos": lat_cos, "px_l2": px_l2}
+        print(f"    latent cosine(CHAI vs baseline)={lat_cos:.4f}  "
+              f"pixel L2={px_l2:.1f}")
 
     # ── Summary bar chart ─────────────────────────────────────────────────────
-    labels  = list(results.keys())
-    l2_vals = [results[lb]["l2"]  for lb in labels]
-    cos_vals= [results[lb]["cos"] for lb in labels]
+    labels   = list(results.keys())
+    cos_vals = [results[lb]["lat_cos"] for lb in labels]
+    l2_vals  = [results[lb]["px_l2"]  for lb in labels]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     x = np.arange(len(labels))
 
-    ax1.bar(x, l2_vals, color="steelblue")
+    ax1.bar(x, cos_vals, color="steelblue")
     ax1.set_xticks(x); ax1.set_xticklabels(labels, rotation=20, ha="right")
-    ax1.set_ylabel("First-frame L2  (CHAI vs baseline)")
-    ax1.set_title("CHAI structural bleed-in (L2)\nHigher = more reference influence")
+    ax1.set_ylabel("Latent cosine similarity  (CHAI vs 8-step baseline)")
+    ax1.set_title("Latent-space alignment\n1 = identical to baseline, lower = more reference bleed-in")
+    ax1.set_ylim(0, 1)
     ax1.grid(axis="y", alpha=0.3)
 
-    ax2.bar(x, cos_vals, color="darkorange")
+    ax2.bar(x, l2_vals, color="darkorange")
     ax2.set_xticks(x); ax2.set_xticklabels(labels, rotation=20, ha="right")
-    ax2.set_ylabel("First-frame cosine similarity  (CHAI vs baseline)")
-    ax2.set_title("CHAI structural alignment (cosine)\nLower = more deviation from baseline")
-    ax2.set_ylim(0, 1)
+    ax2.set_ylabel("Pixel L2  (CHAI vs 8-step baseline, first frame)")
+    ax2.set_title("Visual deviation from baseline\nHigher = more reference influence on output")
     ax2.grid(axis="y", alpha=0.3)
 
     fig.suptitle("Experiment 4: CHAI cross-prompt self-attention injection\n"
-                 "Reference K/V (final latent) injected into target self-attention Q", fontsize=11)
+                 "Ref K/V from 50-step final latent → injected into 8-step target self-attention",
+                 fontsize=11)
     plt.tight_layout()
     path = os.path.join(exp4_dir, "chai_summary.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
@@ -804,162 +819,162 @@ def run_exp2():
     return all_results
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Experiment 3 — CLIP Text Similarity vs Denoising Latent Similarity
-# ══════════════════════════════════════════════════════════════════════════════
+# # ══════════════════════════════════════════════════════════════════════════════
+# # Experiment 3 — CLIP Text Similarity vs Denoising Latent Similarity
+# # ══════════════════════════════════════════════════════════════════════════════
 
-VIDEOCLIP_MODEL_ID = "microsoft/xclip-base-patch32"
+# VIDEOCLIP_MODEL_ID = "microsoft/xclip-base-patch32"
 
-def _encode_prompts_videoclip(prompts):
-    """Encode prompts with X-CLIP (video-language CLIP) text encoder. Returns L2-normalised [N, D]."""
-    tokenizer = XCLIPTokenizer.from_pretrained(VIDEOCLIP_MODEL_ID)
-    model = XCLIPTextModel.from_pretrained(VIDEOCLIP_MODEL_ID).to("cuda").eval()
-    with torch.no_grad():
-        tokens = tokenizer(prompts, padding=True, truncation=True,
-                           max_length=77, return_tensors="pt").to("cuda")
-        embeds = model(**tokens).pooler_output          # [N, D]
-        embeds = embeds / embeds.norm(dim=-1, keepdim=True)
-    model.cpu()
-    return embeds.float().cpu()
+# def _encode_prompts_videoclip(prompts):
+#     """Encode prompts with X-CLIP (video-language CLIP) text encoder. Returns L2-normalised [N, D]."""
+#     tokenizer = XCLIPTokenizer.from_pretrained(VIDEOCLIP_MODEL_ID)
+#     model = XCLIPTextModel.from_pretrained(VIDEOCLIP_MODEL_ID).to("cuda").eval()
+#     with torch.no_grad():
+#         tokens = tokenizer(prompts, padding=True, truncation=True,
+#                            max_length=77, return_tensors="pt").to("cuda")
+#         embeds = model(**tokens).pooler_output          # [N, D]
+#         embeds = embeds / embeds.norm(dim=-1, keepdim=True)
+#     model.cpu()
+#     return embeds.float().cpu()
 
 
-def run_exp3(exp1_sim_path=None, exp1_pid_path=None):
-    """
-    Experiment 3: CLIP text similarity vs denoising latent similarity.
+# def run_exp3(exp1_sim_path=None, exp1_pid_path=None):
+#     """
+#     Experiment 3: CLIP text similarity vs denoising latent similarity.
 
-    Two outputs:
-      (a) CLIP text similarity heatmap over all prompts, grouped by category.
-      (b) If exp1 data is available, Spearman correlation between the text
-          similarity matrix and the latent similarity matrix at each denoising
-          step — reveals at which step the video latent best reflects text semantics.
+#     Two outputs:
+#       (a) CLIP text similarity heatmap over all prompts, grouped by category.
+#       (b) If exp1 data is available, Spearman correlation between the text
+#           similarity matrix and the latent similarity matrix at each denoising
+#           step — reveals at which step the video latent best reflects text semantics.
 
-    Args:
-      exp1_sim_path: path to exp1_sim_matrix.npy (optional, from run_exp1)
-      exp1_pid_path: path to exp1_pid_list.txt   (optional, from run_exp1)
-    """
-    print("\n" + "="*60)
-    print("Experiment 3: CLIP Text Similarity")
-    print("="*60)
+#     Args:
+#       exp1_sim_path: path to exp1_sim_matrix.npy (optional, from run_exp1)
+#       exp1_pid_path: path to exp1_pid_list.txt   (optional, from run_exp1)
+#     """
+#     print("\n" + "="*60)
+#     print("Experiment 3: CLIP Text Similarity")
+#     print("="*60)
 
-    # Collect all (pid, text) in the same order used by exp1
-    all_entries = [(pid, text)
-                   for entries in PROMPT_GROUPS.values()
-                   for pid, text in entries]
-    pids   = [e[0] for e in all_entries]
-    texts  = [e[1] for e in all_entries]
-    n      = len(pids)
-    pid_to_group = {pid: gid
-                    for gid, entries in PROMPT_GROUPS.items()
-                    for pid, _ in entries}
+#     # Collect all (pid, text) in the same order used by exp1
+#     all_entries = [(pid, text)
+#                    for entries in PROMPT_GROUPS.values()
+#                    for pid, text in entries]
+#     pids   = [e[0] for e in all_entries]
+#     texts  = [e[1] for e in all_entries]
+#     n      = len(pids)
+#     pid_to_group = {pid: gid
+#                     for gid, entries in PROMPT_GROUPS.items()
+#                     for pid, _ in entries}
 
-    # ── 1. VideoCLIP (X-CLIP) text embeddings ───────────────────────────────
-    print(f"  Encoding {n} prompts with X-CLIP ({VIDEOCLIP_MODEL_ID})…")
-    embeds = _encode_prompts_videoclip(texts)     # [N, D], already L2-normalised
+#     # ── 1. VideoCLIP (X-CLIP) text embeddings ───────────────────────────────
+#     print(f"  Encoding {n} prompts with X-CLIP ({VIDEOCLIP_MODEL_ID})…")
+#     embeds = _encode_prompts_videoclip(texts)     # [N, D], already L2-normalised
 
-    # Pairwise cosine similarity (dot product of unit vectors)
-    text_sim = (embeds @ embeds.T).numpy()        # [N, N]
+#     # Pairwise cosine similarity (dot product of unit vectors)
+#     text_sim = (embeds @ embeds.T).numpy()        # [N, N]
 
-    # ── 2. Text similarity heatmap ───────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(max(8, n * 0.45), max(7, n * 0.4)))
-    im = ax.imshow(text_sim, vmin=-0.1, vmax=1.0, cmap="RdYlGn", aspect="auto")
-    plt.colorbar(im, ax=ax, label="Cosine similarity")
-    ax.set_xticks(range(n)); ax.set_xticklabels(pids, rotation=90, fontsize=7)
-    ax.set_yticks(range(n)); ax.set_yticklabels(pids, fontsize=7)
+#     # ── 2. Text similarity heatmap ───────────────────────────────────────────
+#     fig, ax = plt.subplots(figsize=(max(8, n * 0.45), max(7, n * 0.4)))
+#     im = ax.imshow(text_sim, vmin=-0.1, vmax=1.0, cmap="RdYlGn", aspect="auto")
+#     plt.colorbar(im, ax=ax, label="Cosine similarity")
+#     ax.set_xticks(range(n)); ax.set_xticklabels(pids, rotation=90, fontsize=7)
+#     ax.set_yticks(range(n)); ax.set_yticklabels(pids, fontsize=7)
 
-    # Draw group boundary lines
-    group_sizes = [len(entries) for entries in PROMPT_GROUPS.values()]
-    boundaries = np.cumsum(group_sizes[:-1]) - 0.5
-    for b in boundaries:
-        ax.axhline(b, color="black", linewidth=1.2)
-        ax.axvline(b, color="black", linewidth=1.2)
+#     # Draw group boundary lines
+#     group_sizes = [len(entries) for entries in PROMPT_GROUPS.values()]
+#     boundaries = np.cumsum(group_sizes[:-1]) - 0.5
+#     for b in boundaries:
+#         ax.axhline(b, color="black", linewidth=1.2)
+#         ax.axvline(b, color="black", linewidth=1.2)
 
-    # Annotate group labels on diagonal blocks
-    cursor = 0
-    for gid, entries in PROMPT_GROUPS.items():
-        mid = cursor + len(entries) / 2 - 0.5
-        ax.text(mid, -1.2, gid, ha="center", va="bottom", fontsize=6,
-                color="navy", fontweight="bold")
-        cursor += len(entries)
+#     # Annotate group labels on diagonal blocks
+#     cursor = 0
+#     for gid, entries in PROMPT_GROUPS.items():
+#         mid = cursor + len(entries) / 2 - 0.5
+#         ax.text(mid, -1.2, gid, ha="center", va="bottom", fontsize=6,
+#                 color="navy", fontweight="bold")
+#         cursor += len(entries)
 
-    ax.set_title("X-CLIP (VideoCLIP) text embedding cosine similarity\n(grouped by prompt category)")
-    plt.tight_layout()
-    path = os.path.join(OUTPUT_DIR, "exp3_clip_text_similarity.png")
-    plt.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"  Saved text similarity heatmap → {path}")
+#     ax.set_title("X-CLIP (VideoCLIP) text embedding cosine similarity\n(grouped by prompt category)")
+#     plt.tight_layout()
+#     path = os.path.join(OUTPUT_DIR, "exp3_clip_text_similarity.png")
+#     plt.savefig(path, dpi=150, bbox_inches="tight")
+#     plt.close()
+#     print(f"  Saved text similarity heatmap → {path}")
 
-    # Save raw matrix
-    np.save(os.path.join(OUTPUT_DIR, "exp3_text_sim_matrix.npy"), text_sim)
+#     # Save raw matrix
+#     np.save(os.path.join(OUTPUT_DIR, "exp3_text_sim_matrix.npy"), text_sim)
 
-    # ── 3. Correlation with exp1 latent similarities (if available) ──────────
-    sim_path = exp1_sim_path or os.path.join(OUTPUT_DIR, "exp1_sim_matrix.npy")
-    pid_path = exp1_pid_path or os.path.join(OUTPUT_DIR, "exp1_pid_list.txt")
+#     # ── 3. Correlation with exp1 latent similarities (if available) ──────────
+#     sim_path = exp1_sim_path or os.path.join(OUTPUT_DIR, "exp1_sim_matrix.npy")
+#     pid_path = exp1_pid_path or os.path.join(OUTPUT_DIR, "exp1_pid_list.txt")
 
-    if not (os.path.exists(sim_path) and os.path.exists(pid_path)):
-        print("  [skip] exp1 data not found — run run_exp1() first for correlation plot.")
-        return
+#     if not (os.path.exists(sim_path) and os.path.exists(pid_path)):
+#         print("  [skip] exp1 data not found — run run_exp1() first for correlation plot.")
+#         return
 
-    lat_sim = np.load(sim_path)   # [N, N, steps]
-    with open(pid_path) as f:
-        exp1_pids = [line.split("\t")[0] for line in f if line.strip()]
+#     lat_sim = np.load(sim_path)   # [N, N, steps]
+#     with open(pid_path) as f:
+#         exp1_pids = [line.split("\t")[0] for line in f if line.strip()]
 
-    # Align ordering: exp1 may have a different pid order
-    try:
-        idx = [exp1_pids.index(p) for p in pids]
-    except ValueError as e:
-        print(f"  [skip] pid mismatch between exp1 and current PROMPT_GROUPS: {e}")
-        return
-    lat_sim = lat_sim[np.ix_(idx, idx)]   # reorder to match current pids
+#     # Align ordering: exp1 may have a different pid order
+#     try:
+#         idx = [exp1_pids.index(p) for p in pids]
+#     except ValueError as e:
+#         print(f"  [skip] pid mismatch between exp1 and current PROMPT_GROUPS: {e}")
+#         return
+#     lat_sim = lat_sim[np.ix_(idx, idx)]   # reorder to match current pids
 
-    steps = lat_sim.shape[2]
-    # Upper-triangle mask (exclude diagonal — always 1.0 vs 1.0)
-    mask = np.triu(np.ones((n, n), dtype=bool), k=1)
-    text_vec = text_sim[mask]             # [N*(N-1)/2]
+#     steps = lat_sim.shape[2]
+#     # Upper-triangle mask (exclude diagonal — always 1.0 vs 1.0)
+#     mask = np.triu(np.ones((n, n), dtype=bool), k=1)
+#     text_vec = text_sim[mask]             # [N*(N-1)/2]
 
-    correlations = []
-    for s in range(steps):
-        lat_vec = lat_sim[:, :, s][mask]
-        rho, _ = spearmanr(text_vec, lat_vec)
-        correlations.append(rho)
+#     correlations = []
+#     for s in range(steps):
+#         lat_vec = lat_sim[:, :, s][mask]
+#         rho, _ = spearmanr(text_vec, lat_vec)
+#         correlations.append(rho)
 
-    # ── Plot: Spearman ρ vs denoising step ───────────────────────────────────
-    step_axis = list(range(1, steps + 1))
-    peak_step = int(np.argmax(correlations)) + 1
-    peak_rho  = correlations[peak_step - 1]
+#     # ── Plot: Spearman ρ vs denoising step ───────────────────────────────────
+#     step_axis = list(range(1, steps + 1))
+#     peak_step = int(np.argmax(correlations)) + 1
+#     peak_rho  = correlations[peak_step - 1]
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(step_axis, correlations, linewidth=2, color="steelblue")
-    ax.axvline(peak_step, color="tomato", linestyle="--", linewidth=1.5,
-               label=f"peak ρ={peak_rho:.3f} at step {peak_step}")
-    ax.set_xlabel(f"Denoising step (1 = highest noise, {steps} = final)")
-    ax.set_ylabel("Spearman ρ  (text sim vs latent sim)")
-    ax.set_title("How well does CLIP text similarity predict video latent similarity?\n"
-                 "Peak = step where latent space most faithfully mirrors text semantics")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    path = os.path.join(OUTPUT_DIR, "exp3_text_latent_correlation.png")
-    plt.savefig(path, dpi=150)
-    plt.close()
-    print(f"  Saved text–latent correlation curve → {path}")
-    print(f"  Peak alignment: step {peak_step}  (ρ = {peak_rho:.3f})")
+#     fig, ax = plt.subplots(figsize=(10, 5))
+#     ax.plot(step_axis, correlations, linewidth=2, color="steelblue")
+#     ax.axvline(peak_step, color="tomato", linestyle="--", linewidth=1.5,
+#                label=f"peak ρ={peak_rho:.3f} at step {peak_step}")
+#     ax.set_xlabel(f"Denoising step (1 = highest noise, {steps} = final)")
+#     ax.set_ylabel("Spearman ρ  (text sim vs latent sim)")
+#     ax.set_title("How well does CLIP text similarity predict video latent similarity?\n"
+#                  "Peak = step where latent space most faithfully mirrors text semantics")
+#     ax.legend()
+#     ax.grid(True, alpha=0.3)
+#     plt.tight_layout()
+#     path = os.path.join(OUTPUT_DIR, "exp3_text_latent_correlation.png")
+#     plt.savefig(path, dpi=150)
+#     plt.close()
+#     print(f"  Saved text–latent correlation curve → {path}")
+#     print(f"  Peak alignment: step {peak_step}  (ρ = {peak_rho:.3f})")
 
-    # ── Per-group breakdown ───────────────────────────────────────────────────
-    # Within each group: does within-group text sim rank match within-group latent rank?
-    print("\n  Per-group CLIP vs latent correlation (at peak step):")
-    for gid, entries in PROMPT_GROUPS.items():
-        g_pids = [p for p, _ in entries]
-        if len(g_pids) < 3:
-            continue
-        g_idx  = [pids.index(p) for p in g_pids]
-        g_mask = np.triu(np.ones((len(g_idx), len(g_idx)), bool), k=1)
-        g_text = text_sim[np.ix_(g_idx, g_idx)][g_mask]
-        g_lat  = lat_sim[np.ix_(g_idx, g_idx), peak_step - 1].squeeze()[g_mask]
-        if g_text.std() < 1e-6:
-            print(f"    [{gid}] skipped (zero variance in text sim)")
-            continue
-        rho, _ = spearmanr(g_text, g_lat)
-        print(f"    [{gid}]  ρ = {rho:.3f}")
+#     # ── Per-group breakdown ───────────────────────────────────────────────────
+#     # Within each group: does within-group text sim rank match within-group latent rank?
+#     print("\n  Per-group CLIP vs latent correlation (at peak step):")
+#     for gid, entries in PROMPT_GROUPS.items():
+#         g_pids = [p for p, _ in entries]
+#         if len(g_pids) < 3:
+#             continue
+#         g_idx  = [pids.index(p) for p in g_pids]
+#         g_mask = np.triu(np.ones((len(g_idx), len(g_idx)), bool), k=1)
+#         g_text = text_sim[np.ix_(g_idx, g_idx)][g_mask]
+#         g_lat  = lat_sim[np.ix_(g_idx, g_idx), peak_step - 1].squeeze()[g_mask]
+#         if g_text.std() < 1e-6:
+#             print(f"    [{gid}] skipped (zero variance in text sim)")
+#             continue
+#         rho, _ = spearmanr(g_text, g_lat)
+#         print(f"    [{gid}]  ρ = {rho:.3f}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -987,8 +1002,8 @@ if __name__ == "__main__":
         run_exp1()
     if args.exp in ("2", "both"):
         run_exp2()
-    if args.exp in ("3", "both"):
-        run_exp3()
+    # if args.exp in ("3", "both"):
+    #     run_exp3()
     if args.exp in ("4", "both"):
         run_exp4_chai()
 
