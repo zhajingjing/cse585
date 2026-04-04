@@ -372,8 +372,7 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
             do_chai = chai_inject and (2 <= step_1based <= 4)
 
             if do_chai:
-                # Inject only block 0, all others normal
-                model.chai_inject_mode(True, layer_range=(0, 1))
+                model.chai_inject_mode(True)   # block 0 only, per paper
             noise_preds_cond = model(
                 latents, t=t_tensor, context=context, seq_len=SEQ_LEN)
             if do_chai:
@@ -424,42 +423,28 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
 def _generate_chai(target_prompts, reference_prompt: str, num_steps=NUM_STEPS,
                    **generate_kwargs):
     """
-    CHAI-style generation: use reference_prompt's FINAL latent K, V in every
-    self-attention layer of the target denoising loop (Q from target noisy latent).
+    CHAI (CacHe Attention Inference) generation.
 
     Steps:
-      1. Fully generate reference_prompt → collect final clean latent z_ref.
-      2. Encode reference text → context_ref.
-      3. Call model.chai_capture_reference() — one forward pass on z_ref at the
-         final (near-clean) timestep; WanSelfAttention stores K, V in-model.
-      4. Generate target_prompts with chai_inject=True.
+      1. Run reference_prompt for 50 steps → collect final output latent z_ref.
+      2. Patch-embed z_ref → store hidden states on block 0's self-attention.
+      3. Run target_prompts for num_steps; at steps 2,3,4 block 0 uses
+         z_ref hidden states as K/V source (Q from target's current hidden state).
     """
     print(f"\n[CHAI] Step 1 — generate reference (50 steps): '{reference_prompt}'")
     _, ref_lat_list = _generate(reference_prompt, collect_steps=[NUM_STEPS],
                                 num_steps=NUM_STEPS)
-    # ref_lat_list[0] shape: [B=1, C, F, H, W]; take the single-prompt tensor
     z_ref = ref_lat_list[0][0]   # [C, F, H, W], cpu float32
 
-    print("[CHAI] Step 2 — encode reference text")
-    context_ref = _encode_text([reference_prompt])   # list of 1 tensor [L, C]
+    print("[CHAI] Step 2 — patch-embed reference latent into block 0")
+    model.chai_set_ref_latent(z_ref.to(device, dtype=torch.bfloat16))
 
-    print("[CHAI] Step 3 — capture K/V from reference final latent")
-    # Use the final (smallest) scheduled timestep so model sees near-clean signal
-    t_final = _make_scheduler().timesteps[-1]
-    t_ref   = torch.stack([t_final])               # [1]
-    model.chai_capture_reference(
-        x_ref=[z_ref.to(device, dtype=torch.bfloat16)],
-        t_ref=t_ref.to(device),
-        context_ref=context_ref,
-        seq_len=SEQ_LEN,
-    )
-
-    print("[CHAI] Step 4 — generate target with CHAI injection")
+    print(f"[CHAI] Step 3 — generate target ({num_steps} steps) with injection at steps 2,3,4")
     try:
         return _generate(target_prompts, chai_inject=True, num_steps=num_steps,
                          **generate_kwargs)
     finally:
-        model.chai_clear_kv()   # remove stored K/V so normal generation is unaffected
+        model.chai_clear()   # remove stored hidden states
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -127,19 +127,12 @@ class WanSelfAttention(nn.Module):
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
-        # ── CHAI cross-prompt self-attention state ────────────────────────────
-        # Inspired by "Cross-image Attention for Zero-Shot Appearance Transfer".
-        # Adapted for video: K and V are taken from a reference prompt's FINAL
-        # (fully denoised) latent; Q comes from the current noisy target latent.
-        # This lets the target generation attend to the reference structure
-        # while text conditioning still drives semantics via cross-attention.
-        #
-        # _chai_ref_kv  : (k, v) captured from reference, stored on CPU.
-        #                  k is already RoPE-applied (positionally encoded).
-        # _chai_capture : when True, the next forward() writes into _chai_ref_kv.
-        # _chai_inject  : when True, forward() uses _chai_ref_kv for K, V.
-        self._chai_ref_kv: tuple | None = None
-        self._chai_capture: bool = False
+        # ── CHAI state (CacHe Attention Inference) ───────────────────────────
+        # _chai_ref_hidden : patch-embedded hidden states of the reference's
+        #                    final output latent, shape [1, L, dim], on CPU.
+        #                    K and V are computed from this on-the-fly during inject.
+        # _chai_inject     : when True, use _chai_ref_hidden for K/V instead of x.
+        self._chai_ref_hidden: torch.Tensor | None = None
         self._chai_inject: bool = False
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
@@ -156,27 +149,20 @@ class WanSelfAttention(nn.Module):
         q = self.norm_q(self.q(x)).view(b, s, n, d)
         q_rope = rope_apply(q, grid_sizes, freqs)
 
-        if self._chai_capture:
-            # Capture mode: compute K, V from the reference input (x = z_ref),
-            # apply RoPE to K, then store both on CPU for later injection.
-            k = self.norm_k(self.k(x)).view(b, s, n, d)
-            v = self.v(x).view(b, s, n, d)
-            k_rope = rope_apply(k, grid_sizes, freqs)
-            self._chai_ref_kv = (k_rope.detach().cpu(), v.detach().cpu())
-            k_final, v_final = k_rope, v
-
-        elif self._chai_inject and self._chai_ref_kv is not None:
-            # Inject mode: both K and V from the reference final latent,
-            # Q from the current noisy target latent — exactly as in CHAI
-            # (CacHe Attention Inference for text2video).
-            # K is already RoPE-applied from capture — no second rope_apply needed.
-            ref_k, ref_v = self._chai_ref_kv
-            k_final = ref_k.to(device=x.device, dtype=x.dtype)
-            v_final = ref_v.to(device=x.device, dtype=x.dtype)
-            if k_final.shape[0] < b:
+        if self._chai_inject and self._chai_ref_hidden is not None:
+            # CHAI inject: K and V computed from the reference's patch-embedded
+            # output latent (h_ref), Q from the current noisy target hidden state.
+            # This is the CHAI paper mechanism: cache the reference output latent,
+            # use it as K/V source in block 0 at denoising steps 2, 3, 4.
+            h_ref = self._chai_ref_hidden.to(device=x.device, dtype=x.dtype)
+            s_ref = h_ref.shape[1]
+            k = self.norm_k(self.k(h_ref)).view(1, s_ref, n, d)
+            v = self.v(h_ref).view(1, s_ref, n, d)
+            k_final = rope_apply(k, grid_sizes[:1], freqs)
+            v_final = v
+            if b > 1:
                 k_final = k_final.expand(b, -1, -1, -1).contiguous()
                 v_final = v_final.expand(b, -1, -1, -1).contiguous()
-
         else:
             # Normal mode: Q, K, V all from the current latent.
             k = self.norm_k(self.k(x)).view(b, s, n, d)
@@ -644,71 +630,33 @@ class WanModel(ModelMixin, ConfigMixin):
             out.append(u)
         return out
 
-    # ── CHAI management methods ───────────────────────────────────────────────
+    # ── CHAI management methods (CacHe Attention Inference) ──────────────────
 
-    def chai_capture_mode(self, enabled: bool = True) -> None:
-        """Enable/disable K/V capture mode on all self-attention blocks."""
-        for block in self.blocks:
-            block.self_attn._chai_capture = enabled
-
-    def chai_inject_mode(self, enabled: bool = True,
-                         layer_range: tuple | None = None) -> None:
-        """Enable/disable CHAI K/V injection on a subset of self-attention blocks.
+    def chai_set_ref_latent(self, z_ref: torch.Tensor) -> None:
+        """
+        Patch-embed the reference output latent and store the hidden states
+        on block 0's self-attention for use during CHAI injection.
 
         Args:
-            enabled     : True to inject, False to disable.
-            layer_range : (start, end) indices into self.blocks (exclusive end),
-                          e.g. (0, 1) injects only the first block.
-                          None means all layers.
+            z_ref : [C, F, H, W] float32 tensor — the fully denoised reference
+                    latent (output of 50-step generation).
         """
-        if layer_range is None:
-            blocks = self.blocks
-        else:
-            blocks = self.blocks[layer_range[0]:layer_range[1]]
-        for block in blocks:
-            block.self_attn._chai_inject = enabled
-        # Always disable injection on layers outside the range
-        if layer_range is not None:
-            for block in self.blocks[:layer_range[0]]:
-                block.self_attn._chai_inject = False
-            for block in self.blocks[layer_range[1]:]:
-                block.self_attn._chai_inject = False
+        with torch.no_grad():
+            # Patch-embed: [C,F,H,W] → [1,C,F_p,H_p,W_p] → [1, L, dim]
+            h = self.patch_embedding(z_ref.unsqueeze(0))   # [1, dim, F_p, H_p, W_p]
+            h = h.flatten(2).transpose(1, 2)               # [1, L, dim]
+        # Store on block 0 only — paper limits injection to the first block
+        self.blocks[0].self_attn._chai_ref_hidden = h.cpu()
+        print(f"[CHAI] stored reference hidden states on block 0, shape {h.shape}")
 
-    def chai_clear_kv(self) -> None:
-        """Clear stored reference K/V tensors and disable injection."""
-        for block in self.blocks:
-            block.self_attn._chai_ref_kv = None
-            block.self_attn._chai_inject = False
+    def chai_inject_mode(self, enabled: bool = True) -> None:
+        """Enable/disable CHAI injection on block 0 only."""
+        self.blocks[0].self_attn._chai_inject = enabled
 
-    @torch.no_grad()
-    def chai_capture_reference(self, x_ref, t_ref, context_ref, seq_len,
-                                **forward_kwargs) -> None:
-        """
-        Run one transformer forward pass on the reference's FINAL clean latent
-        to capture K, V from every self-attention layer.
-
-        Args:
-            x_ref        : list of [C, F, H, W] tensors — the fully denoised
-                           reference latent (one element per batch item).
-            t_ref        : 1-D timestep tensor [B] — use the final (smallest)
-                           scheduled timestep so the model sees a near-clean signal.
-            context_ref  : list of [L, C] text-embedding tensors for reference.
-            seq_len      : int — maximum sequence length (F_p * H_p * W_p).
-            **forward_kwargs : any extra args forwarded to self.forward()
-                               (e.g. clip_fea, y for i2v models).
-
-        After this call, invoke chai_inject_mode(True) before the target
-        denoising loop, and chai_clear_kv() when done.
-        """
-        self.chai_capture_mode(True)
-        try:
-            with amp.autocast(dtype=torch.bfloat16):
-                self(x_ref, t_ref, context_ref, seq_len, **forward_kwargs)
-        finally:
-            self.chai_capture_mode(False)
-
-        n = sum(1 for b in self.blocks if b.self_attn._chai_ref_kv is not None)
-        print(f"[CHAI] captured K/V from {n}/{len(self.blocks)} self-attention layers")
+    def chai_clear(self) -> None:
+        """Clear stored reference hidden states and disable injection."""
+        self.blocks[0].self_attn._chai_ref_hidden = None
+        self.blocks[0].self_attn._chai_inject = False
 
     def init_weights(self):
         r"""
