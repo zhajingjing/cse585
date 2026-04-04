@@ -423,38 +423,61 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
 
 
 def _generate_chai(target_prompts, reference_prompt: str, num_steps=NUM_STEPS,
-                   **generate_kwargs):
+                   inject_steps=(2, 3, 4), **generate_kwargs):
     """
     CHAI (CacHe Attention Inference) generation.
 
     Steps:
-      1. Run reference_prompt for 50 steps → collect final output latent z_ref.
-      2. Patch-embed z_ref → store hidden states on block 0's self-attention.
-      3. Run target_prompts for num_steps; at steps 2,3,4 block 0 uses
-         z_ref hidden states as K/V source (Q from target's current hidden state).
+      1. Run reference_prompt for num_steps, hooking block 0 to capture its
+         input hidden state at each inject step (matching timestep + noise level).
+      2. Run target_prompts for num_steps; at inject_steps block 0 uses the
+         reference's captured hidden states as K/V source.
     """
-    print(f"\n[CHAI] Step 1 — generate reference (50 steps): '{reference_prompt}'")
-    _, ref_lat_list = _generate(reference_prompt, collect_steps=[NUM_STEPS],
-                                num_steps=NUM_STEPS)
-    z_ref = ref_lat_list[0][0]   # [C, F, H, W], cpu float32
-    print(f"[CHAI] z_ref (reference latent)  mean={z_ref.mean():.4f}  std={z_ref.std():.4f}")
+    inject_set    = set(inject_steps)
+    inject_sorted = sorted(inject_set)
+    captured      = {}   # {inject_call_num: tensor [B, L, dim]}
+    _step         = [0]
 
-    print("[CHAI] Step 2 — capture final transformer hidden state from reference")
-    t_final      = _make_scheduler().timesteps[-1]
-    context_ref  = _encode_text([reference_prompt])
-    model.chai_capture_ref_hidden(
-        x_ref=[z_ref.to(device, dtype=torch.bfloat16)],
-        t_ref=torch.stack([t_final]).to(device),
-        context_ref=context_ref,
-        seq_len=SEQ_LEN,
-    )
+    def _hook(_module, inp, _output):
+        if _step[0] in inject_set:
+            call_num = inject_sorted.index(_step[0]) + 1
+            captured[call_num] = inp[0].detach().cpu()
 
-    print(f"[CHAI] Step 3 — generate target ({num_steps} steps) with injection at steps 2,3,4")
+    print(f"\n[CHAI] Step 1 — generate reference ({num_steps} steps) + capture block-0 inputs "
+          f"at steps {inject_sorted}: '{reference_prompt}'")
+    hook = model.blocks[0].register_forward_hook(_hook)
+    try:
+        context_ref  = _encode_text([reference_prompt])
+        context_null = _encode_text([NEGATIVE_PROMPT])
+        scheduler    = _make_scheduler(num_steps)
+        seed_g       = _make_generator()
+        latents      = [torch.randn(_Z_DIM, _F_LAT, _H_LAT, _W_LAT,
+                                    dtype=torch.float32, device=device,
+                                    generator=seed_g)]
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
+            for i, t in enumerate(tqdm(scheduler.timesteps, desc="ref")):
+                _step[0] = i + 1
+                t_tensor = torch.stack([t])
+                nc = model(latents, t=t_tensor, context=context_ref,  seq_len=SEQ_LEN)
+                nu = model(latents, t=t_tensor, context=context_null, seq_len=SEQ_LEN)
+                np_j = nu[0] + 5.0 * (nc[0] - nu[0])
+                upd  = scheduler.step(np_j.float().unsqueeze(0), t,
+                                      latents[0].float().unsqueeze(0),
+                                      return_dict=False, generator=seed_g
+                                      )[0].squeeze(0).float()
+                latents = [upd]
+    finally:
+        hook.remove()
+
+    print(f"[CHAI] captured inject calls: {sorted(captured.keys())}")
+    model.chai_set_hidden_dict(captured)
+
+    print(f"[CHAI] Step 2 — generate target ({num_steps} steps) with injection at steps {inject_sorted}")
     try:
         return _generate(target_prompts, chai_inject=True, num_steps=num_steps,
                          **generate_kwargs)
     finally:
-        model.chai_clear()   # remove stored hidden states
+        model.chai_clear()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -590,7 +613,7 @@ def run_exp4b_self_inject(prompt=None, num_steps=8, inject_steps=(2, 3, 4)):
 # Target text drives semantics. Outputs are compared to the target baseline.
 CHAI_PAIRS = [
     ("colour_swap",
-     "a white horse galloping across a green meadow",
+     "a brown horse galloping across a green meadow",
      "a brown horse galloping across a green meadow"),
     ("subject_swap",
      "a golden retriever running through a park",
