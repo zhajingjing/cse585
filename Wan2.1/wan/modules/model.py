@@ -133,6 +133,7 @@ class WanSelfAttention(nn.Module):
         #                    K and V are computed from this on-the-fly during inject.
         # _chai_inject     : when True, use _chai_ref_hidden for K/V instead of x.
         self._chai_ref_hidden: torch.Tensor | None = None
+        self._chai_ref_hidden_dict: dict | None = None  # {inject_call: tensor} for per-step inject
         self._chai_inject: bool = False
         self._chai_attn_step: int = 0  # counts inject calls for labelling saved maps
 
@@ -150,12 +151,21 @@ class WanSelfAttention(nn.Module):
         q = self.norm_q(self.q(x)).view(b, s, n, d)
         q_rope = rope_apply(q, grid_sizes, freqs)
 
-        if self._chai_inject and self._chai_ref_hidden is not None:
+        # resolve which hidden state to use: per-step dict takes priority
+        _active_ref = None
+        if self._chai_inject:
+            call_num = self._chai_attn_step + 1  # 1-based, before increment
+            if self._chai_ref_hidden_dict is not None:
+                _active_ref = self._chai_ref_hidden_dict.get(call_num)
+            elif self._chai_ref_hidden is not None:
+                _active_ref = self._chai_ref_hidden
+
+        if self._chai_inject and _active_ref is not None:
             # CHAI inject: K and V computed from the reference's patch-embedded
             # output latent (h_ref), Q from the current noisy target hidden state.
             # This is the CHAI paper mechanism: cache the reference output latent,
             # use it as K/V source in block 0 at denoising steps 2, 3, 4.
-            h_ref = self._chai_ref_hidden.to(device=x.device, dtype=x.dtype)
+            h_ref = _active_ref.to(device=x.device, dtype=x.dtype)
             s_ref = h_ref.shape[1]
             k = self.norm_k(self.k(h_ref)).view(1, s_ref, n, d)
             v = self.v(h_ref).view(1, s_ref, n, d)
@@ -727,9 +737,15 @@ class WanModel(ModelMixin, ConfigMixin):
         """Enable/disable CHAI injection on block 0 only."""
         self.blocks[0].self_attn._chai_inject = enabled
 
+    def chai_set_hidden_dict(self, d: dict) -> None:
+        """Set per-inject-call hidden states. d = {1: tensor, 2: tensor, 3: tensor}."""
+        self.blocks[0].self_attn._chai_ref_hidden_dict = d
+        self.blocks[0].self_attn._chai_ref_hidden = None  # dict takes priority
+
     def chai_clear(self) -> None:
         """Clear stored reference hidden states and disable injection."""
         self.blocks[0].self_attn._chai_ref_hidden = None
+        self.blocks[0].self_attn._chai_ref_hidden_dict = None
         self.blocks[0].self_attn._chai_inject = False
         self.blocks[0].self_attn._chai_attn_step = 0
 

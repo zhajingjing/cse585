@@ -458,6 +458,127 @@ def _generate_chai(target_prompts, reference_prompt: str, num_steps=NUM_STEPS,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Experiment 4b — CHAI Self-Injection Sanity Check
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_exp4b_self_inject(prompt=None, num_steps=8, inject_steps=(2, 3, 4)):
+    """
+    Sanity-check: inject block-0 hidden states from the BASELINE run of a prompt
+    back into a second run of the SAME prompt.
+
+    If the implementation is correct, cosine(self-inject vs baseline) ≈ 1.0.
+    If it degrades, the injection mechanism itself has a bug (independent of
+    cross-prompt distribution mismatch).
+    """
+    if prompt is None:
+        prompt = "a brown horse galloping across a green meadow"
+
+    print("\n" + "=" * 60)
+    print("Experiment 4b: CHAI Self-Injection Sanity Check")
+    print(f"  prompt: '{prompt}'")
+    print(f"  inject steps: {inject_steps}")
+    print("=" * 60)
+
+    inject_set    = set(inject_steps)
+    inject_sorted = sorted(inject_set)
+    captured_hiddens = {}   # {inject_call_num: tensor [1, L, dim]}
+    _current_step    = [0]
+
+    def _block0_hook(_module, _input, output):
+        # output is x after block 0: [B, L, dim]
+        step = _current_step[0]
+        if step in inject_set:
+            call_num = inject_sorted.index(step) + 1  # 1-based
+            captured_hiddens[call_num] = output.detach().cpu()
+            print(f"  [capture] step={step} → inject_call={call_num}  "
+                  f"shape={output.shape}  std={output.float().std():.4f}")
+
+    # ── Pass 1: baseline, capture block-0 output at inject steps ─────────────
+    print("\n[Pass 1] Baseline generation + capture block-0 hidden states")
+    hook = model.blocks[0].register_forward_hook(_block0_hook)
+    try:
+        context      = _encode_text([prompt])
+        context_null = _encode_text([NEGATIVE_PROMPT])
+        scheduler    = _make_scheduler(num_steps)
+        timesteps    = scheduler.timesteps
+        seed_g       = _make_generator()
+        latents      = [torch.randn(_Z_DIM, _F_LAT, _H_LAT, _W_LAT,
+                                    dtype=torch.float32, device=device,
+                                    generator=seed_g)]
+
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
+            for i, t in enumerate(tqdm(timesteps, desc="baseline")):
+                _current_step[0] = i + 1
+                t_tensor = torch.stack([t])
+                noise_pred_c = model(latents, t=t_tensor, context=context,
+                                     seq_len=SEQ_LEN)
+                noise_pred_u = model(latents, t=t_tensor, context=context_null,
+                                     seq_len=SEQ_LEN)
+                np_j = noise_pred_u[0] + 5.0 * (noise_pred_c[0] - noise_pred_u[0])
+                upd  = scheduler.step(np_j.float().unsqueeze(0), t,
+                                      latents[0].float().unsqueeze(0),
+                                      return_dict=False, generator=seed_g
+                                      )[0].squeeze(0).float()
+                latents = [upd]
+
+        baseline_lat = latents[0].clone()
+    finally:
+        hook.remove()
+
+    print(f"  captured inject calls: {sorted(captured_hiddens.keys())}")
+
+    # ── Pass 2: same prompt, inject its own block-0 hidden states ────────────
+    print("\n[Pass 2] Self-inject generation")
+    model.chai_set_hidden_dict(captured_hiddens)
+
+    seed_g2   = _make_generator()   # same seed → identical starting noise
+    latents2  = [torch.randn(_Z_DIM, _F_LAT, _H_LAT, _W_LAT,
+                             dtype=torch.float32, device=device,
+                             generator=seed_g2)]
+    scheduler2   = _make_scheduler(num_steps)
+    timesteps2   = scheduler2.timesteps
+    call_counter = [0]
+
+    try:
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
+            for i, t in enumerate(tqdm(timesteps2, desc="self-inject")):
+                step_1based = i + 1
+                do_inject   = step_1based in inject_set
+
+                if do_inject:
+                    model.chai_inject_mode(True)
+                noise_pred_c = model(latents2, t=torch.stack([t]),
+                                     context=context, seq_len=SEQ_LEN)
+                if do_inject:
+                    model.chai_inject_mode(False)
+
+                noise_pred_u = model(latents2, t=torch.stack([t]),
+                                     context=context_null, seq_len=SEQ_LEN)
+                np_j = noise_pred_u[0] + 5.0 * (noise_pred_c[0] - noise_pred_u[0])
+                upd  = scheduler2.step(np_j.float().unsqueeze(0), t,
+                                       latents2[0].float().unsqueeze(0),
+                                       return_dict=False, generator=seed_g2
+                                       )[0].squeeze(0).float()
+                latents2 = [upd]
+    finally:
+        model.chai_clear()
+
+    self_inject_lat = latents2[0]
+
+    cos = torch.nn.functional.cosine_similarity(
+        baseline_lat.flatten().unsqueeze(0),
+        self_inject_lat.flatten().unsqueeze(0)).item()
+    l2  = (baseline_lat - self_inject_lat).norm().item()
+    print(f"\n  cosine(self-inject vs baseline) = {cos:.4f}  "
+          f"L2 = {l2:.4f}")
+    if cos > 0.99:
+        print("  → PASS: injection is transparent (implementation correct)")
+    else:
+        print("  → FAIL: self-injection diverges — implementation has a bug")
+    return cos, l2
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Experiment 4 — CHAI Cross-Prompt Attention Steering
 # ══════════════════════════════════════════════════════════════════════════════
 
