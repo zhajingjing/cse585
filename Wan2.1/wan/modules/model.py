@@ -193,6 +193,7 @@ class WanSelfAttention(nn.Module):
                 idx = torch.randperm(s_q, device=q_rope.device)[:n_sample]
                 q_s = q_rope[:, idx].float()          # [B, n_sample, n, d]
                 k_s = k_final.float()                  # [B, s_k,     n, d]
+                v_s = v_final.float()                  # [B, s_k,     n, d]
                 # logits: [B, n, n_sample, s_k]
                 logits = torch.einsum('bqnd,bknd->bnqk', q_s, k_s) * scale
                 attn_s = logits.softmax(dim=-1)
@@ -201,6 +202,24 @@ class WanSelfAttention(nn.Module):
                 max_w   = attn_s.max().item()
                 mean_w  = attn_s.mean().item()
                 std_w   = attn_s.std().item()
+
+                # Per-token K comparison: injected K (from h_ref) vs natural K (from x)
+                # If extraction is correct, k_ref and k_nat should be identical.
+                k_nat = self.norm_k(self.k(x)).view(b, s, n, d).float()  # [B, s, n, d]
+                # k_final before expand: [1, s_k, n, d]
+                k_ref_1 = self.norm_k(self.k(
+                    _active_ref.to(device=x.device, dtype=x.dtype)
+                )).view(1, s_ref, n, d).float()
+                if self._chai_rescale_k:
+                    k_ref_1 = k_ref_1 * (q.float().std().clamp(min=1e-6) /
+                                         k_ref_1.std().clamp(min=1e-6))
+                # both [B, s, n, d] — compare token by token across all heads
+                k_nat_flat = k_nat.flatten(2)             # [B, s, n*d]
+                k_ref_flat = k_ref_1.expand(b,-1,-1,-1).flatten(2)
+                per_tok_cos = torch.nn.functional.cosine_similarity(
+                    k_nat_flat, k_ref_flat, dim=-1)       # [B, s]
+                per_tok_l2  = (k_nat_flat - k_ref_flat).norm(dim=-1)  # [B, s]
+
             self._chai_attn_step += 1
             step = self._chai_attn_step
             print(f"[CHAI-attn] inject step {step}  s_q={s_q} s_k={s_k} "
@@ -208,6 +227,10 @@ class WanSelfAttention(nn.Module):
                   f"mean={mean_w:.4f}  std={std_w:.4f}  max={max_w:.4f}  "
                   f"entropy={entropy:.3f}  "
                   f"(uniform entropy={float(__import__('math').log(s_k)):.3f})")
+            print(f"[CHAI-attn]   K_injected vs K_natural  "
+                  f"cos mean={per_tok_cos.mean():.4f}  std={per_tok_cos.std():.4f}  "
+                  f"min={per_tok_cos.min():.4f}  |  "
+                  f"L2  mean={per_tok_l2.mean():.4f}  std={per_tok_l2.std():.4f}")
         else:
             # Normal mode: Q, K, V all from the current latent.
             k = self.norm_k(self.k(x)).view(b, s, n, d)
