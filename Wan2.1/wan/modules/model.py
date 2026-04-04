@@ -134,6 +134,7 @@ class WanSelfAttention(nn.Module):
         # _chai_inject     : when True, use _chai_ref_hidden for K/V instead of x.
         self._chai_ref_hidden: torch.Tensor | None = None
         self._chai_inject: bool = False
+        self._chai_attn_step: int = 0  # counts inject calls for labelling saved maps
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
@@ -163,6 +164,20 @@ class WanSelfAttention(nn.Module):
             if b > 1:
                 k_final = k_final.expand(b, -1, -1, -1).contiguous()
                 v_final = v_final.expand(b, -1, -1, -1).contiguous()
+
+            # ── Compute & save attention map [B, n_heads, s_q, s_k] ─────────
+            with torch.no_grad():
+                scale = d ** -0.5
+                # q_rope/k_final: [B, s, n, d] → transpose to [B, n, s, d]
+                attn_w = torch.einsum('bqnd,bknd->bnqk',
+                                      q_rope.float(), k_final.float()) * scale
+                attn_w = attn_w.softmax(dim=-1)   # [B, n_heads, s_q, s_k]
+            self._chai_attn_step += 1
+            step = self._chai_attn_step
+            print(f"[CHAI-attn] inject step {step}  shape={list(attn_w.shape)}  "
+                  f"mean={attn_w.mean():.4f}  std={attn_w.std():.4f}  "
+                  f"max={attn_w.max():.4f}")
+            torch.save(attn_w.cpu(), f"chai_attn_step{step}.pt")
         else:
             # Normal mode: Q, K, V all from the current latent.
             k = self.norm_k(self.k(x)).view(b, s, n, d)
@@ -695,6 +710,7 @@ class WanModel(ModelMixin, ConfigMixin):
         """Clear stored reference hidden states and disable injection."""
         self.blocks[0].self_attn._chai_ref_hidden = None
         self.blocks[0].self_attn._chai_inject = False
+        self.blocks[0].self_attn._chai_attn_step = 0
 
     def init_weights(self):
         r"""
