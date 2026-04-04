@@ -362,17 +362,24 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
     with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
         for i, t in enumerate(tqdm(timesteps, desc="denoising")):
             t_tensor = torch.stack([t] * B)   # [B]
+            step_1based = i + 1               # 1-based denoising step index
 
-            # Conditional pass — CHAI inject active here only:
-            # K, V come from reference final latent; Q from current noisy target.
-            if chai_inject:
-                model.chai_inject_mode(True)
+            # CHAI injection rules (from paper):
+            #   - Skip step 1: Q is pure Gaussian, not yet prompt-modulated
+            #   - Only steps 2, 3, 4: no benefit beyond step 4
+            #   - Only the FIRST transformer block: injecting across successive
+            #     blocks within the same step adds noise
+            do_chai = chai_inject and (2 <= step_1based <= 4)
+
+            if do_chai:
+                # Inject only block 0, all others normal
+                model.chai_inject_mode(True, layer_range=(0, 1))
             noise_preds_cond = model(
                 latents, t=t_tensor, context=context, seq_len=SEQ_LEN)
-            if chai_inject:
+            if do_chai:
                 model.chai_inject_mode(False)
 
-            # Unconditional pass — no CHAI so CFG guidance stays target-only
+            # Unconditional pass — never inject CHAI (CFG stays target-only)
             noise_preds_null = model(
                 latents, t=t_tensor, context=context_null, seq_len=SEQ_LEN)
 
@@ -391,8 +398,8 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
                     upd     = (latents[j].float() + np_j.float() * dt)
                 else:
                     upd = scheduler.step(
-                        np_j.unsqueeze(0), t, latents[j].unsqueeze(0),
-                        return_dict=False)[0].squeeze(0).float()  # [C, F, H, W]
+                        np_j.float().unsqueeze(0), t, latents[j].float().unsqueeze(0),
+                        return_dict=False, generator=seed_g)[0].squeeze(0).float()  # [C, F, H, W]
 
                 new_latents.append(upd)
 

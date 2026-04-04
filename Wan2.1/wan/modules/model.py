@@ -166,13 +166,13 @@ class WanSelfAttention(nn.Module):
             k_final, v_final = k_rope, v
 
         elif self._chai_inject and self._chai_ref_kv is not None:
-            # Inject mode: Q from current noisy target latent (computed above),
-            # K and V from the stored reference final-step latent.
-            # K is already RoPE-applied — no second rope_apply needed.
+            # Inject mode: both K and V from the reference final latent,
+            # Q from the current noisy target latent — exactly as in CHAI
+            # (CacHe Attention Inference for text2video).
+            # K is already RoPE-applied from capture — no second rope_apply needed.
             ref_k, ref_v = self._chai_ref_kv
             k_final = ref_k.to(device=x.device, dtype=x.dtype)
             v_final = ref_v.to(device=x.device, dtype=x.dtype)
-            # Reference was captured at B=1; broadcast to target batch size.
             if k_final.shape[0] < b:
                 k_final = k_final.expand(b, -1, -1, -1).contiguous()
                 v_final = v_final.expand(b, -1, -1, -1).contiguous()
