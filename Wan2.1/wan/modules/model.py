@@ -685,7 +685,8 @@ class WanModel(ModelMixin, ConfigMixin):
         """
         self.chai_capture_mode(True)
         try:
-            self(x_ref, t_ref, context_ref, seq_len, **forward_kwargs)
+            with amp.autocast(dtype=torch.bfloat16):
+                self(x_ref, t_ref, context_ref, seq_len, **forward_kwargs)
         finally:
             self.chai_capture_mode(False)
 

@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 
-# from tqdm import tqdm
+from tqdm import tqdm
 # from transformers import XCLIPTokenizer, XCLIPTextModel
 # from scipy.stats import spearmanr
 
@@ -376,30 +376,31 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
             noise_preds_null = model(
                 latents, t=t_tensor, context=context_null, seq_len=SEQ_LEN)
 
-            # CFG + latent update
-            stacked     = torch.stack(latents)                    # [B, C, F, H, W]
-            noise_pred  = torch.stack([
-                noise_preds_null[j] + 5.0 * (noise_preds_cond[j] - noise_preds_null[j])
-                for j in range(B)
-            ])                                                     # [B, C, F, H, W]
+            # CFG + latent update — process each prompt independently
+            # (scheduler.step expects [1, C, F, H, W], matching WanT2V's loop)
+            new_latents = []
+            for j in range(B):
+                np_j = noise_preds_null[j] + 5.0 * (
+                    noise_preds_cond[j] - noise_preds_null[j])   # [C, F, H, W]
 
-            if start_step is not None:
-                # Euler step for phased/non-uniform schedule (Exp 2 injection)
-                t_scale = float(cfg.num_train_timesteps)
-                t_next  = timesteps[i + 1] if i + 1 < len(timesteps) \
-                          else torch.zeros_like(t)
-                dt       = (t_next - t).float() / t_scale
-                updated  = (stacked.float() + noise_pred.float() * dt)
-            else:
-                updated = scheduler.step(
-                    noise_pred, t, stacked,
-                    return_dict=False)[0].float()                  # [B, C, F, H, W]
+                if start_step is not None:
+                    t_scale = float(cfg.num_train_timesteps)
+                    t_next  = timesteps[i + 1] if i + 1 < len(timesteps) \
+                              else torch.zeros_like(t)
+                    dt      = (t_next - t).float() / t_scale
+                    upd     = (latents[j].float() + np_j.float() * dt)
+                else:
+                    upd = scheduler.step(
+                        np_j.unsqueeze(0), t, latents[j].unsqueeze(0),
+                        return_dict=False)[0].squeeze(0).float()  # [C, F, H, W]
 
-            latents = list(updated.unbind(0))   # list of B [C, F, H, W] tensors
+                new_latents.append(upd)
+
+            latents = new_latents
 
             step_num = step_offset + i + 1
             if step_num in collect_set:
-                collected.append(updated.float().cpu().clone())    # [B, C, F, H, W]
+                collected.append(torch.stack(latents).float().cpu().clone())  # [B, C, F, H, W]
 
     # 5. Decode latents → PIL frames
     all_frames = []
