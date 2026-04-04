@@ -427,25 +427,28 @@ def _generate_chai(target_prompts, reference_prompt: str, num_steps=NUM_STEPS,
     """
     CHAI (CacHe Attention Inference) generation.
 
-    Steps:
-      1. Run reference_prompt for num_steps, hooking block 0 to capture its
-         input hidden state at each inject step (matching timestep + noise level).
-      2. Run target_prompts for num_steps; at inject_steps block 0 uses the
-         reference's captured hidden states as K/V source.
+    Capture the final transformer block's output at step N from the reference,
+    inject it as K/V into block 0's self-attention at step N+1 of the target.
+    i.e. inject_step=2 uses the last-block output from reference step 1, etc.
     """
     inject_set    = set(inject_steps)
     inject_sorted = sorted(inject_set)
+    # capture steps are one before each inject step
+    capture_steps = {s - 1: s for s in inject_sorted}   # {cap_step: inject_step}
     captured      = {}   # {inject_call_num: tensor [B, L, dim]}
     _step         = [0]
 
-    def _hook(_module, inp, _output):
-        if _step[0] in inject_set:
-            call_num = inject_sorted.index(_step[0]) + 1
-            captured[call_num] = inp[0].detach().cpu()
+    def _hook(_module, _inp, output):
+        if _step[0] in capture_steps:
+            inject_step = capture_steps[_step[0]]
+            call_num    = inject_sorted.index(inject_step) + 1
+            captured[call_num] = output.detach().cpu()
+            print(f"  [CHAI capture] ref step={_step[0]} → inject call {call_num} "
+                  f"(target step {inject_step})  std={output.float().std():.4f}")
 
-    print(f"\n[CHAI] Step 1 — generate reference ({num_steps} steps) + capture block-0 inputs "
-          f"at steps {inject_sorted}: '{reference_prompt}'")
-    hook = model.blocks[0].register_forward_hook(_hook)
+    print(f"\n[CHAI] Step 1 — generate reference ({num_steps} steps), capture last-block "
+          f"output at steps {sorted(capture_steps)}: '{reference_prompt}'")
+    hook = model.blocks[-1].register_forward_hook(_hook)
     try:
         context_ref  = _encode_text([reference_prompt])
         context_null = _encode_text([NEGATIVE_PROMPT])
