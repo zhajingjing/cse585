@@ -651,11 +651,28 @@ class WanModel(ModelMixin, ConfigMixin):
         for block in self.blocks:
             block.self_attn._chai_capture = enabled
 
-    def chai_inject_mode(self, enabled: bool = True) -> None:
-        """Enable/disable CHAI K/V injection in all self-attention blocks.
-        Has no effect until chai_capture_reference() has been called."""
-        for block in self.blocks:
+    def chai_inject_mode(self, enabled: bool = True,
+                         layer_range: tuple | None = None) -> None:
+        """Enable/disable CHAI K/V injection on a subset of self-attention blocks.
+
+        Args:
+            enabled     : True to inject, False to disable.
+            layer_range : (start, end) indices into self.blocks (exclusive end),
+                          e.g. (0, 1) injects only the first block.
+                          None means all layers.
+        """
+        if layer_range is None:
+            blocks = self.blocks
+        else:
+            blocks = self.blocks[layer_range[0]:layer_range[1]]
+        for block in blocks:
             block.self_attn._chai_inject = enabled
+        # Always disable injection on layers outside the range
+        if layer_range is not None:
+            for block in self.blocks[:layer_range[0]]:
+                block.self_attn._chai_inject = False
+            for block in self.blocks[layer_range[1]:]:
+                block.self_attn._chai_inject = False
 
     def chai_clear_kv(self) -> None:
         """Clear stored reference K/V tensors and disable injection."""
