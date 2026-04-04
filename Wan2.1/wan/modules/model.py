@@ -709,10 +709,13 @@ class WanModel(ModelMixin, ConfigMixin):
 
             kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes,
                           freqs=self.freqs, context=context, context_lens=context_lens)
-            for block in self.blocks:
-                x = block(x, **kwargs)
+            # Only run block 0 — capture its output as the K/V source.
+            # Injecting into block 0's self-attn requires block-0-level features,
+            # not final-layer features (which live in a different representational
+            # space and cause attention sinks).
+            x = self.blocks[0](x, **kwargs)
 
-            captured['h'] = x.detach().cpu()   # [1, L, dim] — before head
+            captured['h'] = x.detach().cpu()   # [1, L, dim] — after block 0 only
 
         with torch.no_grad(), amp.autocast(dtype=torch.bfloat16):
             _capturing_forward(x_ref, t_ref, context_ref, seq_len)
