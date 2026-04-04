@@ -528,7 +528,8 @@ def run_exp4b_self_inject(prompt=None, num_steps=8, inject_steps=(2, 3, 4)):
     print(f"  captured inject calls: {sorted(captured_hiddens.keys())}")
 
     # ── Pass 2: same prompt, inject its own block-0 hidden states ────────────
-    print("\n[Pass 2] Self-inject generation")
+    print("\n[Pass 2] Self-inject generation (rescaling OFF)")
+    model.chai_rescale_k(False)
     model.chai_set_hidden_dict(captured_hiddens)
 
     seed_g2   = _make_generator()   # same seed → identical starting noise

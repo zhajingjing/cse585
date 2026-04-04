@@ -135,6 +135,7 @@ class WanSelfAttention(nn.Module):
         self._chai_ref_hidden: torch.Tensor | None = None
         self._chai_ref_hidden_dict: dict | None = None  # {inject_call: tensor} for per-step inject
         self._chai_inject: bool = False
+        self._chai_rescale_k: bool = True  # set False to skip Q-std rescaling (e.g. self-inject test)
         self._chai_attn_step: int = 0  # counts inject calls for labelling saved maps
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
@@ -169,11 +170,12 @@ class WanSelfAttention(nn.Module):
             s_ref = h_ref.shape[1]
             k = self.norm_k(self.k(h_ref)).view(1, s_ref, n, d)
             v = self.v(h_ref).view(1, s_ref, n, d)
-            # Rescale K to match Q's std to prevent attention collapse caused by
-            # distribution mismatch (K from clean ref latent, Q from noisy target).
-            q_std = q.float().std().clamp(min=1e-6)
-            k_std = k.float().std().clamp(min=1e-6)
-            k = k * (q_std / k_std)
+            if self._chai_rescale_k:
+                # Rescale K to match Q's std to prevent attention collapse caused by
+                # distribution mismatch (K from clean ref latent, Q from noisy target).
+                q_std = q.float().std().clamp(min=1e-6)
+                k_std = k.float().std().clamp(min=1e-6)
+                k = k * (q_std / k_std)
             k_final = rope_apply(k, grid_sizes[:1], freqs)
             v_final = v
             if b > 1:
@@ -737,6 +739,10 @@ class WanModel(ModelMixin, ConfigMixin):
         """Enable/disable CHAI injection on block 0 only."""
         self.blocks[0].self_attn._chai_inject = enabled
 
+    def chai_rescale_k(self, enabled: bool) -> None:
+        """Toggle Q-std rescaling of K. Disable for self-inject identity tests."""
+        self.blocks[0].self_attn._chai_rescale_k = enabled
+
     def chai_set_hidden_dict(self, d: dict) -> None:
         """Set per-inject-call hidden states. d = {1: tensor, 2: tensor, 3: tensor}."""
         self.blocks[0].self_attn._chai_ref_hidden_dict = d
@@ -747,6 +753,7 @@ class WanModel(ModelMixin, ConfigMixin):
         self.blocks[0].self_attn._chai_ref_hidden = None
         self.blocks[0].self_attn._chai_ref_hidden_dict = None
         self.blocks[0].self_attn._chai_inject = False
+        self.blocks[0].self_attn._chai_rescale_k = True
         self.blocks[0].self_attn._chai_attn_step = 0
 
     def init_weights(self):
