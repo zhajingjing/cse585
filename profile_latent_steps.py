@@ -372,6 +372,8 @@ def _generate(prompts, collect_steps=None, start_latent=None, start_step=None,
             do_chai = chai_inject and (2 <= step_1based <= 4)
 
             if do_chai:
+                tgt_lat = torch.stack(latents).float()
+                print(f"[CHAI] step={step_1based}  target latent  mean={tgt_lat.mean():.4f}  std={tgt_lat.std():.4f}")
                 model.chai_inject_mode(True)   # block 0 only, per paper
             noise_preds_cond = model(
                 latents, t=t_tensor, context=context, seq_len=SEQ_LEN)
@@ -435,6 +437,7 @@ def _generate_chai(target_prompts, reference_prompt: str, num_steps=NUM_STEPS,
     _, ref_lat_list = _generate(reference_prompt, collect_steps=[NUM_STEPS],
                                 num_steps=NUM_STEPS)
     z_ref = ref_lat_list[0][0]   # [C, F, H, W], cpu float32
+    print(f"[CHAI] z_ref (reference latent)  mean={z_ref.mean():.4f}  std={z_ref.std():.4f}")
 
     print("[CHAI] Step 2 — capture final transformer hidden state from reference")
     t_final      = _make_scheduler().timesteps[-1]
