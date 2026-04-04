@@ -632,22 +632,60 @@ class WanModel(ModelMixin, ConfigMixin):
 
     # ── CHAI management methods (CacHe Attention Inference) ──────────────────
 
-    def chai_set_ref_latent(self, z_ref: torch.Tensor) -> None:
+    def chai_capture_ref_hidden(self, x_ref, t_ref, context_ref, seq_len) -> None:
         """
-        Patch-embed the reference output latent and store the hidden states
-        on block 0's self-attention for use during CHAI injection.
+        Run the full reference forward pass and capture the transformer's final
+        hidden state (after all 30 blocks, before self.head projects back to
+        diffusion latent space). Store it on block 0 for CHAI injection.
 
         Args:
-            z_ref : [C, F, H, W] float32 tensor — the fully denoised reference
-                    latent (output of 50-step generation).
+            x_ref       : list of [C, F, H, W] bfloat16 tensors — reference latent.
+            t_ref       : [1] timestep tensor.
+            context_ref : list of [L, C] text embedding tensors.
+            seq_len     : int sequence length.
         """
+        # Temporarily replace forward to stop just before self.head
+        captured = {}
+
+        def _capturing_forward(x, t, context, seq_len):
+            # Run everything up to (but not including) self.head
+            device = self.patch_embedding.weight.device
+            if self.freqs.device != device:
+                self.freqs = self.freqs.to(device)
+
+            x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+            grid_sizes = torch.stack(
+                [torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
+            x = [u.flatten(2).transpose(1, 2) for u in x]
+            seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
+            x = torch.cat([
+                torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))], dim=1)
+                for u in x
+            ])
+
+            with amp.autocast(dtype=torch.float32):
+                e = self.time_embedding(
+                    sinusoidal_embedding_1d(self.freq_dim, t).float())
+                e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+
+            context_lens = None
+            context = self.text_embedding(torch.stack([
+                torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
+                for u in context
+            ]))
+
+            kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes,
+                          freqs=self.freqs, context=context, context_lens=context_lens)
+            for block in self.blocks:
+                x = block(x, **kwargs)
+
+            captured['h'] = x.detach().cpu()   # [1, L, dim] — before head
+
         with torch.no_grad(), amp.autocast(dtype=torch.bfloat16):
-            # Patch-embed: [C,F,H,W] → [1,C,F_p,H_p,W_p] → [1, L, dim]
-            h = self.patch_embedding(z_ref.unsqueeze(0))   # [1, dim, F_p, H_p, W_p]
-            h = h.flatten(2).transpose(1, 2)               # [1, L, dim]
-        # Store on block 0 only — paper limits injection to the first block
-        self.blocks[0].self_attn._chai_ref_hidden = h.cpu()
-        print(f"[CHAI] stored reference hidden states on block 0, shape {h.shape}")
+            _capturing_forward(x_ref, t_ref, context_ref, seq_len)
+
+        self.blocks[0].self_attn._chai_ref_hidden = captured['h']
+        print(f"[CHAI] captured final hidden state, shape {captured['h'].shape}")
 
     def chai_inject_mode(self, enabled: bool = True) -> None:
         """Enable/disable CHAI injection on block 0 only."""

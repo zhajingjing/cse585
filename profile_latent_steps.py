@@ -436,8 +436,15 @@ def _generate_chai(target_prompts, reference_prompt: str, num_steps=NUM_STEPS,
                                 num_steps=NUM_STEPS)
     z_ref = ref_lat_list[0][0]   # [C, F, H, W], cpu float32
 
-    print("[CHAI] Step 2 — patch-embed reference latent into block 0")
-    model.chai_set_ref_latent(z_ref.to(device, dtype=torch.bfloat16))
+    print("[CHAI] Step 2 — capture final transformer hidden state from reference")
+    t_final      = _make_scheduler().timesteps[-1]
+    context_ref  = _encode_text([reference_prompt])
+    model.chai_capture_ref_hidden(
+        x_ref=[z_ref.to(device, dtype=torch.bfloat16)],
+        t_ref=torch.stack([t_final]).to(device),
+        context_ref=context_ref,
+        seq_len=SEQ_LEN,
+    )
 
     print(f"[CHAI] Step 3 — generate target ({num_steps} steps) with injection at steps 2,3,4")
     try:
