@@ -37,7 +37,7 @@ from tqdm import tqdm
 from transformers import CLIPModel, CLIPProcessor
 
 from eval.teacache.experiments.utils import read_prompt_list
-from serving_system_N import KMinHeapCache, evict_from_faiss
+from serving_system_N import KMinHeapCache
 
 WAN_ROOT = os.path.join(os.path.dirname(__file__), "Wan2.1")
 if WAN_ROOT not in sys.path:
@@ -79,6 +79,26 @@ def summarize_prompt(prompt, max_len=72):
 def log_message(enabled, message):
     if enabled:
         print(message, flush=True)
+
+
+def rebuild_faiss_index(embeddings, embedding_dim):
+    index = faiss.IndexFlatL2(embedding_dim)
+    if len(embeddings) > 0:
+        index.add(embeddings.astype(np.float32, copy=False))
+    return index
+
+
+def remove_cache_entry_from_faiss(cache_id, embedding_dim, index, embeddings, faiss_cache_ids):
+    if cache_id not in faiss_cache_ids:
+        return index, embeddings, faiss_cache_ids
+
+    remove_pos = faiss_cache_ids.index(cache_id)
+    mask = np.ones(len(faiss_cache_ids), dtype=bool)
+    mask[remove_pos] = False
+    new_embeddings = embeddings[mask]
+    new_faiss_cache_ids = [cid for i, cid in enumerate(faiss_cache_ids) if i != remove_pos]
+    new_index = rebuild_faiss_index(new_embeddings, embedding_dim)
+    return new_index, new_embeddings, new_faiss_cache_ids
 
 
 def _load_teacache_module():
@@ -362,9 +382,11 @@ def request_scheduler_video(
     selected_requests,
     start_time,
     index,
+    embedding_dim,
     cache,
     new_cache_queue,
     cached_requests,
+    faiss_cache_ids,
     final_text_embeddings,
     k_values,
     worker_status,
@@ -405,23 +427,28 @@ def request_scheduler_video(
             new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
             new_cached_prompt = cache_data["prompt"]
             new_query_embedding = cache_data["query_embedding"]
+            new_cache_id = cache_data["cache_id"]
 
             while len(cache.item_map) + len(cache.k_values) > cache.max_size:
-                evicted_index = cache.evict()
-                if evicted_index is not None:
-                    del cached_requests[evicted_index]
-                    index, final_text_embeddings = evict_from_faiss(
-                        index, final_text_embeddings, evicted_index
+                evicted_cache_id = cache.evict()
+                if evicted_cache_id is not None:
+                    cached_requests.pop(evicted_cache_id, None)
+                    index, final_text_embeddings, faiss_cache_ids = remove_cache_entry_from_faiss(
+                        evicted_cache_id,
+                        embedding_dim,
+                        index,
+                        final_text_embeddings,
+                        faiss_cache_ids,
                     )
 
-            num_embeddings = index.ntotal
-            cached_requests.append(new_cached_prompt)
+            cached_requests[new_cache_id] = new_cached_prompt
+            faiss_cache_ids.append(new_cache_id)
             index.add(new_query_embedding)
             final_text_embeddings = np.concatenate(
                 (final_text_embeddings, new_query_embedding), axis=0
             )
             for idx, k in enumerate(k_values):
-                cache.insert(num_embeddings, 0, k, new_cached_latents[idx])
+                cache.insert(new_cache_id, 0, k, new_cached_latents[idx])
 
         prompt = row["prompt"]
         request_id = row["request_id"]
@@ -465,7 +492,9 @@ def request_scheduler_video(
             req_queue.put(row.to_dict())
         else:
             distances, indices = index.search(query_embedding, k=1)
-            closest_prompt = cached_requests[indices[0][0]]
+            closest_faiss_pos = indices[0][0]
+            closest_cache_id = faiss_cache_ids[closest_faiss_pos]
+            closest_prompt = cached_requests[closest_cache_id]
             closest_texts = processor(
                 text=[closest_prompt],
                 return_tensors="pt",
@@ -499,7 +528,7 @@ def request_scheduler_video(
                 else:
                     closest_index = 5
 
-                best_candidate = cache.retrieve(closest_index, indices[0][0])
+                best_candidate = cache.retrieve(closest_index, closest_cache_id)
                 if best_candidate:
                     _, (_, k_i, latent) = best_candidate
                     row["cached"] = True
@@ -558,37 +587,15 @@ def request_scheduler_video(
         for _ in range(num_workers):
             req_queue.put(None)
         log_message(log_enabled, "[Scheduler] eval_mode complete, sent shutdown sentinels")
-        return
-
-    while not req_queue.empty():
-        while not new_cache_queue.empty():
-            cache_data = new_cache_queue.get()
-            new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
-            new_cached_prompt = cache_data["prompt"]
-            new_query_embedding = cache_data["query_embedding"]
-            while len(cache.item_map) + len(cache.k_values) > cache.max_size:
-                evicted_index = cache.evict()
-                if evicted_index is not None:
-                    del cached_requests[evicted_index]
-                    index, final_text_embeddings = evict_from_faiss(
-                        index, final_text_embeddings, evicted_index
-                    )
-            num_embeddings = index.ntotal
-            cached_requests.append(new_cached_prompt)
-            index.add(new_query_embedding)
-            final_text_embeddings = np.concatenate(
-                (final_text_embeddings, new_query_embedding), axis=0
-            )
-            for idx, k in enumerate(k_values):
-                cache.insert(num_embeddings, 0, k, new_cached_latents[idx])
+    else:
+        for _ in range(num_workers):
+            req_queue.put(None)
+        log_message(log_enabled, "[Scheduler] request list complete, sent shutdown sentinels")
 
     while True:
-        if req_queue.empty():
-            all_done = all(
-                status in ["finished", "dropped"] for status in worker_status.values()
-            )
-            if all_done:
-                break
+        all_done = all(status in ["finished", "dropped"] for status in worker_status.values())
+        if all_done:
+            break
         time.sleep(1)
 
 
@@ -611,6 +618,7 @@ def worker_video(
     use_ret_steps,
     offload_model,
     log_enabled,
+    eval_mode,
     loop=1,
     no_nirvana=False,
 ):
@@ -639,7 +647,7 @@ def worker_video(
     worker_status[gpu_id] = "running"
 
     idle_counter = 0
-    max_idle_iterations = 100
+    max_idle_iterations = 1 if eval_mode else 100
 
     while True:
         try:
@@ -719,6 +727,7 @@ def worker_video(
                         ).astype(np.float32)
                         new_cache_queue.put(
                             {
+                                "cache_id": request_id,
                                 "cached_latents": cached_latents,
                                 "prompt": prompt,
                                 "query_embedding": qe_np,
@@ -795,6 +804,14 @@ def generate_rapidly_increasing_seconds_from_start(
     request_rates = min_rate_per_sec + (max_rate_per_sec - min_rate_per_sec) * sigmoid_growth
     interarrival_times = 1 / np.maximum(request_rates, 1e-3)
     return np.cumsum(interarrival_times)
+
+
+def generate_fixed_interval_seconds_from_start(num_requests, interval_seconds):
+    if num_requests <= 0:
+        return np.array([], dtype=np.float32)
+    if interval_seconds < 0:
+        raise ValueError("interval_seconds must be non-negative")
+    return np.arange(num_requests, dtype=np.float32) * float(interval_seconds)
 
 
 def main():
@@ -894,6 +911,12 @@ def main():
         help="No request timing: submit all prompts at once and run as fast as possible",
     )
     parser.add_argument(
+        "--request_interval_seconds",
+        type=float,
+        default=None,
+        help="In non-eval mode, use a fixed gap between request arrivals instead of the default rising-rate schedule",
+    )
+    parser.add_argument(
         "--no_nirvana",
         action="store_true",
         help="Disable Nirvana cache: every request does full generation",
@@ -938,9 +961,14 @@ def main():
         ] * max(1, (num_req + 2) // 3)
         prompts = prompts[:num_req]
 
-    seconds_from_start = generate_rapidly_increasing_seconds_from_start(
-        len(prompts), min_rate=0.5, max_rate=4
-    )
+    if args.request_interval_seconds is not None:
+        seconds_from_start = generate_fixed_interval_seconds_from_start(
+            len(prompts), args.request_interval_seconds
+        )
+    else:
+        seconds_from_start = generate_rapidly_increasing_seconds_from_start(
+            len(prompts), min_rate=0.5, max_rate=4
+        )
     selected_requests = pd.DataFrame(
         {
             "request_id": list(range(len(prompts))),
@@ -952,7 +980,8 @@ def main():
     embedding_dim = 768
     index = faiss.IndexFlatL2(embedding_dim)
     final_text_embeddings = np.zeros((0, embedding_dim), dtype=np.float32)
-    cached_requests = []
+    cached_requests = {}
+    faiss_cache_ids = []
     cache = KMinHeapCache(
         max_size=args.cache_size * len(K_VALUES_VIDEO),
         initial_embeddings=final_text_embeddings,
@@ -977,9 +1006,11 @@ def main():
             selected_requests,
             wall_start,
             index,
+            embedding_dim,
             cache,
             new_cache_queue,
             cached_requests,
+            faiss_cache_ids,
             final_text_embeddings,
             K_VALUES_VIDEO,
             worker_status,
@@ -1020,6 +1051,7 @@ def main():
                 args.use_ret_steps,
                 args.offload_model,
                 args.log,
+                args.eval_mode,
                 args.loop,
                 args.no_nirvana,
             ),
