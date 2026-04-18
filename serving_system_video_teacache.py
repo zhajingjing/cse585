@@ -160,6 +160,31 @@ def normalize_cached_latent(cache_latent):
     return cache_latent.contiguous()
 
 
+def get_clip_text_embedding(clip_model, **texts):
+    """
+    Normalize CLIP text embedding extraction across transformers versions.
+
+    Some environments return the projected text embedding tensor from
+    `get_text_features`, while others may surface a model-output object.
+    """
+    text_features = clip_model.get_text_features(**texts)
+    if isinstance(text_features, torch.Tensor):
+        return text_features
+
+    if hasattr(text_features, "pooler_output"):
+        pooled = text_features.pooler_output
+        if hasattr(clip_model, "text_projection"):
+            return clip_model.text_projection(pooled)
+        return pooled
+
+    if hasattr(text_features, "text_embeds"):
+        return text_features.text_embeds
+
+    raise TypeError(
+        f"Unsupported CLIP text feature return type: {type(text_features).__name__}"
+    )
+
+
 def wan_generate_with_latent_cache(
     pipeline,
     input_prompt,
@@ -393,7 +418,7 @@ def request_scheduler_video(
             max_length=77,
         ).to(device)
         with torch.no_grad():
-            text_embedding = clip_model.get_text_features(**texts).cpu()
+            text_embedding = get_clip_text_embedding(clip_model, **texts).cpu()
 
         if no_nirvana:
             row["cached"] = None
@@ -424,7 +449,9 @@ def request_scheduler_video(
                 max_length=77,
             ).to(device)
             with torch.no_grad():
-                closest_text_embedding = clip_model.get_text_features(**closest_texts)
+                closest_text_embedding = get_clip_text_embedding(
+                    clip_model, **closest_texts
+                )
 
             text_embedding_device = text_embedding.to(device)
             with torch.no_grad():
