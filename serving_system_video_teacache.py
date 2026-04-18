@@ -61,12 +61,11 @@ DEFAULT_NUM_SAMPLING_STEPS = 50
 DEFAULT_GUIDE_SCALE = 5.0
 DEFAULT_SAMPLE_SOLVER = "unipc"
 DEFAULT_SAMPLE_SHIFT = 5.0
-K_VALUES_VIDEO = [5, 10, 15]
+K_VALUES_VIDEO = [5, 10]
 
 CLIP_MODEL_ID = "openai/clip-vit-large-patch14"
-SIMILARITY_THRESHOLD = 0.65
+SIMILARITY_THRESHOLD = 0.90
 HIGH_SIMILARITY_THRESHOLD = 0.95
-MID_SIMILARITY_THRESHOLD = 0.85
 
 
 def summarize_prompt(prompt, max_len=72):
@@ -522,8 +521,6 @@ def request_scheduler_video(
 
             if similarity > SIMILARITY_THRESHOLD:
                 if similarity > HIGH_SIMILARITY_THRESHOLD:
-                    closest_index = 15
-                elif similarity > MID_SIMILARITY_THRESHOLD:
                     closest_index = 10
                 else:
                     closest_index = 5
