@@ -78,8 +78,8 @@ def request_scheduler_video(
     cached_requests,
     final_text_embeddings,
     k_values,
-    processor,
-    clip_model,
+    clip_model_name,
+    clip_device,
     worker_status,
     done_event,
     log_file="request_throughput_video_teacache.csv",
@@ -87,7 +87,11 @@ def request_scheduler_video(
     no_nirvana=False,
     cache_stats=None,
 ):
-    device = clip_model.device
+    # Load CLIP inside the subprocess so it owns the CUDA tensors and can
+    # release them cleanly on exit (avoids CudaIPCTypes producer warning).
+    processor  = CLIPProcessor.from_pretrained(clip_model_name)
+    clip_model = CLIPModel.from_pretrained(clip_model_name).to(clip_device)
+    device = clip_device
     agg_k_distribution = {k: 0 for k in k_values}
     if cache_stats is None:
         cache_stats = {"hits": 0, "misses": 0}
@@ -499,9 +503,8 @@ def main():
     # Bug 3 fix: event lets scheduler notify workers to exit cleanly when done.
     done_event = manager.Event()
 
-    device = "cuda:0"
-    processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
-    clip_model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
+    clip_model_name = "openai/clip-vit-large-patch14"
+    clip_device     = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     wall_start = time.time()
     scheduler = mp.Process(
@@ -516,8 +519,8 @@ def main():
             cached_requests,
             final_text_embeddings,
             K_VALUES_VIDEO,
-            processor,
-            clip_model,
+            clip_model_name,
+            clip_device,
             worker_status,
             done_event,
         ),
