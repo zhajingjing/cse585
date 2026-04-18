@@ -369,6 +369,7 @@ def request_scheduler_video(
     k_values,
     worker_status,
     clip_model_id,
+    num_workers,
     log_enabled=False,
     log_file="request_throughput_video_teacache.csv",
     eval_mode=False,
@@ -553,6 +554,12 @@ def request_scheduler_video(
             request_count_per_min = 0
             last_check_time_queue = current_time
 
+    if eval_mode:
+        for _ in range(num_workers):
+            req_queue.put(None)
+        log_message(log_enabled, "[Scheduler] eval_mode complete, sent shutdown sentinels")
+        return
+
     while not req_queue.empty():
         while not new_cache_queue.empty():
             cache_data = new_cache_queue.get()
@@ -637,6 +644,10 @@ def worker_video(
     while True:
         try:
             request = req_queue.get(timeout=10)
+            if request is None:
+                worker_status[gpu_id] = "finished"
+                log_message(log_enabled, f"[Worker {gpu_id}] received shutdown sentinel")
+                break
             process_start = time.time()
             idle_counter = 0
             prompt = request["prompt"]
@@ -973,6 +984,7 @@ def main():
             K_VALUES_VIDEO,
             worker_status,
             CLIP_MODEL_ID,
+            num_gpus,
         ),
         kwargs={
             "log_enabled": args.log,
