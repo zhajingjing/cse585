@@ -424,12 +424,20 @@ def main():
         default="request_throughput_video_teacache_w_nirvana.csv",
         help="log file path",
     )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=None,
+        help="Max number of worker processes (default: all GPUs). Use 1 for fair Nirvana vs no-Nirvana comparison to avoid GPU contention.",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.video_directory, exist_ok=True)
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
         raise RuntimeError("No CUDA devices")
+    num_workers = args.num_workers if args.num_workers is not None else num_gpus
+    num_workers = min(num_workers, num_gpus)
 
     # Prompts (same as opensora: read_prompt_list uses prompt_en from JSON)
     if args.prompt_list and os.path.isfile(args.prompt_list):
@@ -506,7 +514,7 @@ def main():
     scheduler.start()
 
     workers = []
-    for gpu_id in range(num_gpus):
+    for gpu_id in range(num_workers):
         worker_status[gpu_id] = "starting"
         p = mp.Process(
             target=worker_video,
