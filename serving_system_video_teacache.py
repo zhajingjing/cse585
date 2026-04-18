@@ -69,6 +69,18 @@ HIGH_SIMILARITY_THRESHOLD = 0.95
 MID_SIMILARITY_THRESHOLD = 0.85
 
 
+def summarize_prompt(prompt, max_len=72):
+    prompt = " ".join(str(prompt).split())
+    if len(prompt) <= max_len:
+        return prompt
+    return prompt[: max_len - 3] + "..."
+
+
+def log_message(enabled, message):
+    if enabled:
+        print(message, flush=True)
+
+
 def _load_teacache_module():
     module_path = os.path.join(os.path.dirname(__file__), "teacache_wan2.1.py")
     spec = importlib.util.spec_from_file_location("teacache_wan2_1", module_path)
@@ -357,6 +369,7 @@ def request_scheduler_video(
     k_values,
     worker_status,
     clip_model_id,
+    log_enabled=False,
     log_file="request_throughput_video_teacache.csv",
     eval_mode=False,
     no_nirvana=False,
@@ -410,6 +423,7 @@ def request_scheduler_video(
                 cache.insert(num_embeddings, 0, k, new_cached_latents[idx])
 
         prompt = row["prompt"]
+        request_id = row["request_id"]
         texts = processor(
             text=[prompt],
             return_tensors="pt",
@@ -425,6 +439,11 @@ def request_scheduler_video(
             row["k"] = None
             row["latent"] = None
             row["query_embedding"] = text_embedding.clone()
+            log_message(
+                log_enabled,
+                f"[Scheduler] request={request_id} mode=miss reason=no_nirvana "
+                f"prompt='{summarize_prompt(prompt)}'",
+            )
             cache_stats["misses"] = cache_stats.get("misses", 0) + 1
             req_queue.put(row.to_dict())
             continue
@@ -436,6 +455,11 @@ def request_scheduler_video(
             row["k"] = None
             row["latent"] = None
             row["query_embedding"] = text_embedding.clone()
+            log_message(
+                log_enabled,
+                f"[Scheduler] request={request_id} mode=miss reason=empty_cache "
+                f"prompt='{summarize_prompt(prompt)}'",
+            )
             cache_stats["misses"] = cache_stats.get("misses", 0) + 1
             req_queue.put(row.to_dict())
         else:
@@ -481,6 +505,11 @@ def request_scheduler_video(
                     row["k"] = k_i
                     row["latent"] = latent.clone().to(dtype=torch.float32).cpu()
                     row["query_embedding"] = text_embedding.clone()
+                    log_message(
+                        log_enabled,
+                        f"[Scheduler] request={request_id} mode=hit sim={similarity:.3f} "
+                        f"k={k_i} prompt='{summarize_prompt(prompt)}'",
+                    )
                     cache_stats["hits"] = cache_stats.get("hits", 0) + 1
                     req_queue.put(row.to_dict())
                     agg_k_distribution[k_i] += 1
@@ -489,6 +518,11 @@ def request_scheduler_video(
                     row["k"] = None
                     row["latent"] = None
                     row["query_embedding"] = text_embedding.clone()
+                    log_message(
+                        log_enabled,
+                        f"[Scheduler] request={request_id} mode=miss reason=cache_lookup_failed "
+                        f"sim={similarity:.3f} prompt='{summarize_prompt(prompt)}'",
+                    )
                     cache_stats["misses"] = cache_stats.get("misses", 0) + 1
                     req_queue.put(row.to_dict())
             else:
@@ -496,6 +530,11 @@ def request_scheduler_video(
                 row["k"] = None
                 row["latent"] = None
                 row["query_embedding"] = text_embedding.clone()
+                log_message(
+                    log_enabled,
+                    f"[Scheduler] request={request_id} mode=miss reason=low_similarity "
+                    f"sim={similarity:.3f} prompt='{summarize_prompt(prompt)}'",
+                )
                 cache_stats["misses"] = cache_stats.get("misses", 0) + 1
                 req_queue.put(row.to_dict())
 
@@ -564,6 +603,7 @@ def worker_video(
     teacache_thresh,
     use_ret_steps,
     offload_model,
+    log_enabled,
     loop=1,
     no_nirvana=False,
 ):
@@ -600,9 +640,22 @@ def worker_video(
             process_start = time.time()
             idle_counter = 0
             prompt = request["prompt"]
+            request_id = request.get("request_id", "unknown")
+            cache_mode = "hit" if request["cached"] else "miss"
+            log_message(
+                log_enabled,
+                f"[Worker {gpu_id}] request={request_id} start mode={cache_mode} "
+                f"prompt='{summarize_prompt(prompt)}'",
+            )
 
             for l in range(loop):
                 out_path = os.path.join(video_directory, f"{prompt}-{l}.mp4")
+                generation_start = time.time()
+                log_message(
+                    log_enabled,
+                    f"[Worker {gpu_id}] request={request_id} generation={l + 1}/{loop} "
+                    f"status=started mode={cache_mode}",
+                )
 
                 if request["cached"] is None:
                     reset_wan_teacache_state(pipeline.model)
@@ -694,8 +747,20 @@ def worker_video(
                         value_range=(-1, 1),
                     )
 
+                generation_elapsed = time.time() - generation_start
+                log_message(
+                    log_enabled,
+                    f"[Worker {gpu_id}] request={request_id} generation={l + 1}/{loop} "
+                    f"status=finished elapsed={generation_elapsed:.2f}s output='{out_path}'",
+                )
+
             finish_time = time.time() - request["start_time"]
             pure_processing_time = time.time() - process_start
+            log_message(
+                log_enabled,
+                f"[Worker {gpu_id}] request={request_id} completed "
+                f"queue_to_finish={finish_time:.2f}s processing={pure_processing_time:.2f}s",
+            )
             latency_queue.put((finish_time, pure_processing_time))
         except queue.Empty:
             idle_counter += 1
@@ -823,6 +888,11 @@ def main():
         help="Disable Nirvana cache: every request does full generation",
     )
     parser.add_argument(
+        "--log",
+        action="store_true",
+        help="Print per-request scheduler and worker progress logs",
+    )
+    parser.add_argument(
         "--log_file",
         type=str,
         default="request_throughput_video_teacache_w_nirvana.csv",
@@ -861,7 +931,11 @@ def main():
         len(prompts), min_rate=0.5, max_rate=4
     )
     selected_requests = pd.DataFrame(
-        {"prompt": prompts, "seconds_from_start": seconds_from_start}
+        {
+            "request_id": list(range(len(prompts))),
+            "prompt": prompts,
+            "seconds_from_start": seconds_from_start,
+        }
     )
 
     embedding_dim = 768
@@ -901,6 +975,7 @@ def main():
             CLIP_MODEL_ID,
         ),
         kwargs={
+            "log_enabled": args.log,
             "log_file": args.log_file,
             "eval_mode": args.eval_mode,
             "no_nirvana": args.no_nirvana,
@@ -932,6 +1007,7 @@ def main():
                 args.teacache_thresh,
                 args.use_ret_steps,
                 args.offload_model,
+                args.log,
                 args.loop,
                 args.no_nirvana,
             ),
