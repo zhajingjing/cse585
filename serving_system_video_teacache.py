@@ -3,7 +3,6 @@ Nirvana-style cross-request latent cache for TeaCache video (Open-Sora).
 Uses k_values = [5, 10, 15]; CLIP for prompt similarity; FAISS + KMinHeapCache.
 """
 import os
-import re
 import time
 import queue
 import argparse
@@ -29,6 +28,46 @@ DEFAULT_NUM_FRAMES = 51
 K_VALUES_VIDEO = [5, 10, 15]
 
 
+def _drain_new_cache_queue(
+    new_cache_queue, cache, cached_requests, index, final_text_embeddings, k_values
+):
+    """Drain pending latent-cache entries from workers into the cache.
+
+    Normalizes embeddings for IndexFlatIP, evicts if needed, and remaps
+    KMinHeapCache indices to stay aligned with the FAISS index after eviction.
+
+    Returns updated (index, final_text_embeddings).
+    """
+    while not new_cache_queue.empty():
+        cache_data = new_cache_queue.get()
+        new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
+        new_cached_prompt = cache_data["prompt"]
+        new_query_embedding = cache_data["query_embedding"]
+
+        while len(cache.item_map) + len(cache.k_values) > cache.max_size:
+            evicted_index = cache.evict()
+            if evicted_index is not None:
+                del cached_requests[evicted_index]
+                index, final_text_embeddings = evict_from_faiss(
+                    index, final_text_embeddings, evicted_index, use_ip=True
+                )
+                cache.remap_index_after_eviction(evicted_index)
+
+        # Normalize before inserting into IndexFlatIP so inner-product == cosine.
+        normalized_embedding = new_query_embedding.copy()
+        faiss.normalize_L2(normalized_embedding)
+
+        num_embeddings = index.ntotal
+        cached_requests.append(new_cached_prompt)
+        index.add(normalized_embedding)
+        final_text_embeddings = np.concatenate(
+            (final_text_embeddings, normalized_embedding), axis=0
+        )
+        for idx, k in enumerate(k_values):
+            cache.insert(num_embeddings, 0, k, new_cached_latents[idx])
+
+    return index, final_text_embeddings
+
 def request_scheduler_video(
     req_queue,
     selected_requests,
@@ -42,6 +81,7 @@ def request_scheduler_video(
     processor,
     clip_model,
     worker_status,
+    done_event,
     log_file="request_throughput_video_teacache.csv",
     eval_mode=False,
     no_nirvana=False,
@@ -67,31 +107,14 @@ def request_scheduler_video(
         request_arrival_time = time.time()
         row["start_time"] = request_arrival_time
 
-        while not new_cache_queue.empty():
-            cache_data = new_cache_queue.get()
-            new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
-            new_cached_prompt = cache_data["prompt"]
-            new_query_embedding = cache_data["query_embedding"]
-            while len(cache.item_map) + len(cache.k_values) > cache.max_size:
-                evicted_index = cache.evict()
-                if evicted_index is not None:
-                    del cached_requests[evicted_index]
-                    index, final_text_embeddings = evict_from_faiss(
-                        index, final_text_embeddings, evicted_index
-                    )
-
-            num_embeddings = index.ntotal
-            cached_requests.append(new_cached_prompt)
-            index.add(new_query_embedding)
-            final_text_embeddings = np.concatenate(
-                (final_text_embeddings, new_query_embedding), axis=0
-            )
-            for idx, k in enumerate(k_values):
-                cache.insert(num_embeddings, 0, k, new_cached_latents[idx])
+        # Bug 2 fix: use helper that also calls remap_index_after_eviction
+        # Bug 4 fix: helper normalizes embeddings for IndexFlatIP
+        index, final_text_embeddings = _drain_new_cache_queue(
+            new_cache_queue, cache, cached_requests, index, final_text_embeddings, k_values
+        )
 
         prompt = row["prompt"]
         if no_nirvana:
-            # No cache: every request does full generation (for A/B time comparison)
             with torch.no_grad():
                 texts = processor(
                     text=[prompt],
@@ -118,7 +141,12 @@ def request_scheduler_video(
         ).to(device)
         with torch.no_grad():
             text_embedding = clip_model.get_text_features(**texts).cpu()
-        query_embedding = text_embedding.numpy().reshape(1, -1)
+
+        # Bug 4 fix: normalize query before searching IndexFlatIP;
+        # inner-product on unit vectors == cosine similarity, eliminating the
+        # redundant second CLIP call that was needed with IndexFlatL2.
+        query_embedding = text_embedding.numpy().reshape(1, -1).copy()
+        faiss.normalize_L2(query_embedding)
 
         if index.ntotal == 0:
             row["cached"] = None
@@ -129,32 +157,16 @@ def request_scheduler_video(
             req_queue.put(row.to_dict())
         else:
             distances, indices = index.search(query_embedding, k=1)
-            closest_prompt = cached_requests[indices[0][0]]
-            closest_texts = processor(
-                text=closest_prompt,
-                return_tensors="pt",
-                truncation=True,
-                padding=True,
-                max_length=77,
-            ).to(device)
-            with torch.no_grad():
-                closest_text_embedding = clip_model.get_text_features(**closest_texts)
-            text_embedding_device = text_embedding.to(device)
-            with torch.no_grad():
-                text_norm = text_embedding_device / text_embedding_device.norm(
-                    dim=-1, keepdim=True
-                )
-                closest_text_norm = closest_text_embedding / closest_text_embedding.norm(
-                    dim=-1, keepdim=True
-                )
-                text_similarity_scores = torch.matmul(text_norm, closest_text_norm.T)
-            text_similarity_scores = torch.clamp(text_similarity_scores, min=0)
-            text_embedding = text_embedding_device.cpu()
+            # With IndexFlatIP + L2-normalized vectors the distance IS cosine similarity.
+            text_similarity = float(distances[0][0])
 
-            if text_similarity_scores.item() > 0.65:
-                if text_similarity_scores.item() > 0.95:
+            if text_similarity > 0.65:
+                # Opt 2: finer-grained k mapping across the full (0.65, 1.0] range
+                if text_similarity > 0.95:
                     closest_index = 15
-                elif text_similarity_scores.item() > 0.85:
+                elif text_similarity > 0.85:
+                    closest_index = 10
+                elif text_similarity > 0.75:
                     closest_index = 10
                 else:
                     closest_index = 5
@@ -198,27 +210,20 @@ def request_scheduler_video(
             request_count_per_min = 0
             last_check_time_queue = current_time
 
+    # Drain any remaining cache updates while workers finish their last requests.
+    # Bug D fix: sleep to avoid busy-spinning when both queues are temporarily empty.
     while not req_queue.empty():
-        while not new_cache_queue.empty():
-            cache_data = new_cache_queue.get()
-            new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
-            new_cached_prompt = cache_data["prompt"]
-            new_query_embedding = cache_data["query_embedding"]
-            while len(cache.item_map) + len(cache.k_values) > cache.max_size:
-                evicted_index = cache.evict()
-                if evicted_index is not None:
-                    del cached_requests[evicted_index]
-                    index, final_text_embeddings = evict_from_faiss(
-                        index, final_text_embeddings, evicted_index
-                    )
-            num_embeddings = index.ntotal
-            cached_requests.append(new_cached_prompt)
-            index.add(new_query_embedding)
-            final_text_embeddings = np.concatenate(
-                (final_text_embeddings, new_query_embedding), axis=0
-            )
-            for idx, k in enumerate(k_values):
-                cache.insert(num_embeddings, 0, k, new_cached_latents[idx])
+        index, final_text_embeddings = _drain_new_cache_queue(
+            new_cache_queue, cache, cached_requests, index, final_text_embeddings, k_values
+        )
+        time.sleep(0.05)
+
+    # Bug F fix: log k distribution so cache skipping behaviour is observable.
+    print(f"[Scheduler] k distribution: {agg_k_distribution}")
+
+    # Bug 3 fix: signal workers that no more requests are coming so they can
+    # exit cleanly as "finished" rather than waiting ~1000 s for idle timeout.
+    done_event.set()
 
     while True:
         if req_queue.empty():
@@ -241,6 +246,7 @@ def worker_video(
     aspect_ratio,
     num_frames,
     teacache_thresh,
+    done_event,
     loop=1,
     no_nirvana=False,
 ):
@@ -248,14 +254,15 @@ def worker_video(
     config = OpenSoraConfig(num_gpus=1, num_sampling_steps=30)
     engine = VideoSysEngine(config)
 
-    # TeaCache patch
+    # Bug 1 fix: set TeaCache state on the instance, not the class, so multiple
+    # workers don't overwrite each other's accumulated_rel_l1_distance etc.
     trans = engine.driver_worker.transformer
-    trans.__class__.enable_teacache = True
-    trans.__class__.rel_l1_thresh = teacache_thresh
-    trans.__class__.accumulated_rel_l1_distance = 0
-    trans.__class__.previous_modulated_input = None
-    trans.__class__.previous_residual = None
-    trans.__class__.forward = teacache_forward
+    trans.enable_teacache = True
+    trans.rel_l1_thresh = teacache_thresh
+    trans.accumulated_rel_l1_distance = 0
+    trans.previous_modulated_input = None
+    trans.previous_residual = None
+    trans.__class__.forward = teacache_forward  # method binding must stay on class
 
     pipeline = engine.driver_worker
     idle_counter = 0
@@ -267,19 +274,19 @@ def worker_video(
             process_start = time.time()
             idle_counter = 0
             prompt = request["prompt"]
-            # Same naming as eval/teacache/experiments/utils.py: {prompt}-{l}.mp4
-            for l in range(loop):
-                out_path = os.path.join(video_directory, f"{prompt}-{l}.mp4")
+            # Same naming as eval/teacache/experiments/utils.py: {prompt}-{loop_idx}.mp4
+            for loop_idx in range(loop):  # Opt 3: renamed l → loop_idx (l/1 ambiguity)
+                out_path = os.path.join(video_directory, f"{prompt}-{loop_idx}.mp4")
 
                 if request["cached"] is None:
-                    # Full generation (cache miss); write cache only on first loop iteration
-                    collect_latents = tuple(K_VALUES_VIDEO) if (l == 0) else None
+                    # Full generation (cache miss); collect latents only on first iteration
+                    collect_latents = tuple(K_VALUES_VIDEO) if (loop_idx == 0) else None
                     result = pipeline.generate(
                         prompt,
                         resolution=resolution,
                         aspect_ratio=aspect_ratio,
                         num_frames=num_frames,
-                        seed=l,
+                        seed=loop_idx,
                         verbose=False,
                         collect_latents_at_steps=collect_latents,
                     )
@@ -302,10 +309,10 @@ def worker_video(
                             }
                         )
                 else:
-                    # Nirvana hit: use same cached latent for every loop iteration, only seed differs
+                    # Nirvana hit: use cached latent, only seed differs per loop iteration
                     cache_latent = request["latent"]
                     # Normalize cached latent shape to [B, C, T, H, W].
-                    # Stored latents may already include batch dim (5D), and older entries can be 6D.
+                    # Stored latents may already include batch dim (5D), older entries can be 6D.
                     if isinstance(cache_latent, torch.Tensor):
                         if cache_latent.dim() == 4:
                             cache_latent = cache_latent.unsqueeze(0)
@@ -319,7 +326,7 @@ def worker_video(
                         resolution=resolution,
                         aspect_ratio=aspect_ratio,
                         num_frames=num_frames,
-                        seed=l,
+                        seed=loop_idx,
                         verbose=False,
                         cache_latent=cache_latent,
                         cache_start_step=k,
@@ -336,6 +343,11 @@ def worker_video(
             latency_queue.put((finish_time, pure_processing_time))
 
         except queue.Empty:
+            # Bug 3 fix: exit cleanly as "finished" once the scheduler signals
+            # no more requests, rather than waiting ~1000 s for idle timeout.
+            if done_event.is_set():
+                worker_status[gpu_id] = "finished"
+                break
             idle_counter += 1
             if idle_counter >= max_idle_iterations:
                 worker_status[gpu_id] = "dropped"
@@ -462,8 +474,10 @@ def main():
     )
 
     # Empty initial cache
+    # Bug 4 fix: IndexFlatIP + L2-normalized embeddings → inner product == cosine similarity,
+    # so FAISS nearest-neighbour is consistent with the cosine threshold decisions.
     embedding_dim = 768
-    index = faiss.IndexFlatL2(embedding_dim)
+    index = faiss.IndexFlatIP(embedding_dim)
     final_text_embeddings = np.zeros((0, embedding_dim), dtype=np.float32)
     cached_requests = []
     # KMinHeapCache with empty initial state and k_values [5, 10, 15]
@@ -482,6 +496,8 @@ def main():
     cache_stats = manager.dict()
     cache_stats["hits"] = 0
     cache_stats["misses"] = 0
+    # Bug 3 fix: event lets scheduler notify workers to exit cleanly when done.
+    done_event = manager.Event()
 
     device = "cuda:0"
     processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
@@ -503,6 +519,7 @@ def main():
             processor,
             clip_model,
             worker_status,
+            done_event,
         ),
         kwargs={
             "log_file": args.log_file,
@@ -529,6 +546,7 @@ def main():
                 args.aspect_ratio,
                 args.num_frames,
                 args.teacache_thresh,
+                done_event,
                 args.loop,
                 args.no_nirvana,
             ),

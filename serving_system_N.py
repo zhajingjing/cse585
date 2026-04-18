@@ -69,29 +69,25 @@ def generate_rapidly_increasing_seconds_from_start(num_requests, min_rate=2, max
 
     return seconds_from_start
 
-def evict_from_faiss(index, embeddings, remove_index):
+def evict_from_faiss(index, embeddings, remove_index, use_ip=False):
     """
     Removes the embedding at remove_index from the FAISS index.
-    
+
     Args:
         index (faiss.Index): The FAISS index.
         embeddings (np.ndarray): The array of embeddings.
         remove_index (int): The index of the embedding to remove.
-        
+        use_ip (bool): If True, rebuild with IndexFlatIP (inner product / cosine).
+
     Returns:
         faiss.Index: A new FAISS index without the removed embedding.
     """
-    # Create a mask to exclude the embedding to be removed
     mask = np.ones(len(embeddings), dtype=bool)
     mask[remove_index] = False
-    
-    # Filter the embeddings to keep only the ones that are not removed
     filtered_embeddings = embeddings[mask]
-    
-    # Create a new FAISS index and add the remaining embeddings
-    new_index = faiss.IndexFlatL2(embeddings.shape[1])
+    dim = embeddings.shape[1]
+    new_index = faiss.IndexFlatIP(dim) if use_ip else faiss.IndexFlatL2(dim)
     new_index.add(filtered_embeddings)
-
     return new_index, filtered_embeddings
 
 def precompute_timesteps_for_labels_35(scheduler, labels, device, index):
@@ -146,8 +142,9 @@ class KMinHeapCache:
         if index not in self.index_map:
             self.index_map[index] = set(self.k_values)
 
-        if len(self.item_map) > self.max_size:
-            self.evict()
+        # Bug B fix: removed internal fallback evict() whose return value was
+        # discarded, causing FAISS/cache index misalignment.  The caller
+        # (_drain_new_cache_queue) is responsible for pre-evicting before insert.
 
     def update_score(self, index, k_i):
         if (index, k_i) in self.item_map:
@@ -174,24 +171,42 @@ class KMinHeapCache:
                 if not self.index_map[index]:
                     del self.index_map[index]
                     evicted_index = index
-                    print(evicted_index)
-                    break  # Stop eviction after removing one index
+                    break  # Stop eviction after removing one full index
 
         return evicted_index
 
     def retrieve(self, k_optimal, index_to_search):
-        candidates = [
-            (score, (index, k_i, latent)) for score, (index, k_i, latent) in self.heap
-            if index == index_to_search and k_i <= k_optimal
-        ]
-        
+        # Bug A fix: query item_map (valid entries only, O(k_values)) instead of
+        # scanning the heap which contains O(N) stale lazy-deleted entries.
+        candidates = []
+        for k_i in self.k_values:
+            if k_i <= k_optimal and (index_to_search, k_i) in self.item_map:
+                score, (_, _, latent) = self.item_map[(index_to_search, k_i)]
+                candidates.append((score, (index_to_search, k_i, latent)))
+
         if candidates:
             best_candidate = max(candidates, key=lambda x: x[1][1])
-            score, (index, k_i, latent) = best_candidate
-
-            self.update_score(index, k_i)
-            return best_candidate  # Includes latent tensor
+            _, (_, k_i, _) = best_candidate
+            self.update_score(index_to_search, k_i)
+            return best_candidate
         return None
+
+    def remap_index_after_eviction(self, evicted_index):
+        """After evict_from_faiss removes entry at evicted_index, all cache keys
+        with index > evicted_index shift down by 1 to stay aligned with FAISS."""
+        new_item_map = {}
+        new_index_map = {}
+        new_heap = []
+        for (idx, k_i), (score, (_, _, latent)) in self.item_map.items():
+            new_idx = idx - 1 if idx > evicted_index else idx
+            entry = (score, (new_idx, k_i, latent))
+            new_item_map[(new_idx, k_i)] = entry
+            new_heap.append(entry)
+            new_index_map.setdefault(new_idx, set()).add(k_i)
+        heapq.heapify(new_heap)
+        self.heap = new_heap
+        self.item_map = new_item_map
+        self.index_map = new_index_map
 
 
 # Function to load the Stable Diffusion 3.5 model
