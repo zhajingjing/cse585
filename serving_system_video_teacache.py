@@ -164,6 +164,11 @@ def configure_wan_teacache(model, checkpoint_dir, sampling_steps, teacache_thres
     reset_wan_teacache_state(model)
 
 
+def disable_wan_teacache(model):
+    model.__class__.enable_teacache = False
+    reset_wan_teacache_state(model)
+
+
 def reset_wan_teacache_state(model):
     model.__class__.cnt = 0
     model.__class__.accumulated_rel_l1_distance_even = 0
@@ -618,6 +623,7 @@ def worker_video(
     teacache_thresh,
     use_ret_steps,
     offload_model,
+    disable_teacache,
     log_enabled,
     eval_mode,
     loop=1,
@@ -638,13 +644,16 @@ def worker_video(
         t5_cpu=False,
     )
     pipeline.__class__.generate = wan_generate_with_latent_cache
-    configure_wan_teacache(
-        pipeline.model,
-        checkpoint_dir=ckpt_dir,
-        sampling_steps=sampling_steps,
-        teacache_thresh=teacache_thresh,
-        use_ret_steps=use_ret_steps,
-    )
+    if disable_teacache:
+        disable_wan_teacache(pipeline.model)
+    else:
+        configure_wan_teacache(
+            pipeline.model,
+            checkpoint_dir=ckpt_dir,
+            sampling_steps=sampling_steps,
+            teacache_thresh=teacache_thresh,
+            use_ret_steps=use_ret_steps,
+        )
     worker_status[gpu_id] = "running"
 
     idle_counter = 0
@@ -678,14 +687,17 @@ def worker_video(
                 )
 
                 if request["cached"] is None:
-                    reset_wan_teacache_state(pipeline.model)
-                    configure_wan_teacache(
-                        pipeline.model,
-                        checkpoint_dir=ckpt_dir,
-                        sampling_steps=sampling_steps,
-                        teacache_thresh=teacache_thresh,
-                        use_ret_steps=use_ret_steps,
-                    )
+                    if disable_teacache:
+                        disable_wan_teacache(pipeline.model)
+                    else:
+                        reset_wan_teacache_state(pipeline.model)
+                        configure_wan_teacache(
+                            pipeline.model,
+                            checkpoint_dir=ckpt_dir,
+                            sampling_steps=sampling_steps,
+                            teacache_thresh=teacache_thresh,
+                            use_ret_steps=use_ret_steps,
+                        )
                     collect_latents = tuple(K_VALUES_VIDEO) if l == 0 else None
                     result = pipeline.generate(
                         prompt,
@@ -738,13 +750,16 @@ def worker_video(
                     cache_latent = normalize_cached_latent(request["latent"])
                     k = request["k"]
                     remaining_steps = sampling_steps - k
-                    configure_wan_teacache(
-                        pipeline.model,
-                        checkpoint_dir=ckpt_dir,
-                        sampling_steps=remaining_steps,
-                        teacache_thresh=teacache_thresh,
-                        use_ret_steps=use_ret_steps,
-                    )
+                    if disable_teacache:
+                        disable_wan_teacache(pipeline.model)
+                    else:
+                        configure_wan_teacache(
+                            pipeline.model,
+                            checkpoint_dir=ckpt_dir,
+                            sampling_steps=remaining_steps,
+                            teacache_thresh=teacache_thresh,
+                            use_ret_steps=use_ret_steps,
+                        )
                     result = pipeline.generate(
                         prompt,
                         size=video_size,
@@ -894,6 +909,11 @@ def main():
         "--use_ret_steps",
         action="store_true",
         help="Enable Wan TeaCache retention-step configuration",
+    )
+    parser.add_argument(
+        "--no_teacache",
+        action="store_true",
+        help="Disable TeaCache and run plain Wan denoising",
     )
     parser.add_argument(
         "--offload_model",
@@ -1051,6 +1071,7 @@ def main():
                 args.teacache_thresh,
                 args.use_ret_steps,
                 args.offload_model,
+                args.no_teacache,
                 args.log,
                 args.eval_mode,
                 args.loop,
