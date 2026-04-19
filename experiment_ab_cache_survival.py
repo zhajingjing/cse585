@@ -35,6 +35,7 @@ import argparse
 import csv
 import os
 import sys
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -68,6 +69,7 @@ CLIP_MODEL_ID = "openai/clip-vit-large-patch14"
 class GenerationResult:
     video: torch.Tensor
     collected_latents: list
+    elapsed_seconds: float
 
 
 def summarize_prompt(prompt, max_len=80):
@@ -99,13 +101,6 @@ def frame_tensor_to_pil(frame_tensor):
     frame = frame_tensor.detach().cpu().clamp(-1, 1).add(1).div(2)
     frame = (frame.permute(1, 2, 0).numpy() * 255.0).clip(0, 255).astype(np.uint8)
     return Image.fromarray(frame)
-
-
-def compute_pixel_distances(video_a, video_b):
-    diff = (video_a.float() - video_b.float()).reshape(-1)
-    mse = torch.mean(diff.pow(2)).item()
-    l2 = torch.norm(diff, p=2).item()
-    return {"mse": mse, "l2": l2}
 
 
 def compute_lpips_distance(video_a, video_b, frame_indices, device):
@@ -168,6 +163,7 @@ def generate_video(
     cache_latent=None,
     cache_start_step=None,
 ):
+    start_time = time.time()
     result = pipeline.generate(
         prompt,
         size=size,
@@ -189,7 +185,11 @@ def generate_video(
         collected_latents = []
     if not isinstance(video, torch.Tensor):
         raise TypeError(f"Expected video tensor, got {type(video).__name__}")
-    return GenerationResult(video=video.detach().cpu(), collected_latents=collected_latents)
+    return GenerationResult(
+        video=video.detach().cpu(),
+        collected_latents=collected_latents,
+        elapsed_seconds=time.time() - start_time,
+    )
 
 
 def build_pipeline(args):
@@ -300,13 +300,12 @@ def run_pair_experiment(
             cache_start_step=cache_step,
         )
         name = f"B_from_step{cache_step}"
-        resumed_results[name] = resumed.video
+        resumed_results[name] = resumed
         save_video_tensor(resumed.video, os.path.join(pair_dir, f"{name}.mp4"), cfg.sample_fps)
 
     metric_rows = []
-    for name, video in resumed_results.items():
-        dist_to_a = compute_pixel_distances(video, a_result.video)
-        dist_to_b = compute_pixel_distances(video, b_full_result.video)
+    for name, result in resumed_results.items():
+        video = result.video
         lpips_to_a = compute_lpips_distance(video, a_result.video, frame_indices, pipeline.device)
         lpips_to_b = compute_lpips_distance(video, b_full_result.video, frame_indices, pipeline.device)
         clip_to_a = compute_clip_text_video_alignment(
@@ -315,25 +314,20 @@ def run_pair_experiment(
         clip_to_b = compute_clip_text_video_alignment(
             video, prompt_b, frame_indices, clip_model, clip_processor, pipeline.device
         )
-        b_survival_ratio = dist_to_a["mse"] / max(dist_to_b["mse"], 1e-8)
-        a_dominance_ratio = dist_to_b["mse"] / max(dist_to_a["mse"], 1e-8)
         metric_rows.append(
             {
                 "pair_dir": pair_dir,
                 "prompt_a": prompt_a,
                 "prompt_b": prompt_b,
                 "variant": name,
-                "pixel_mse_to_A_full": dist_to_a["mse"],
-                "pixel_l2_to_A_full": dist_to_a["l2"],
-                "pixel_mse_to_B_full": dist_to_b["mse"],
-                "pixel_l2_to_B_full": dist_to_b["l2"],
+                "time_A_full_seconds": a_result.elapsed_seconds,
+                "time_B_full_seconds": b_full_result.elapsed_seconds,
+                "time_variant_seconds": result.elapsed_seconds,
                 "lpips_to_A_full": lpips_to_a,
                 "lpips_to_B_full": lpips_to_b,
                 "clip_align_to_prompt_A": clip_to_a,
                 "clip_align_to_prompt_B": clip_to_b,
                 "clip_semantic_margin_B_minus_A": clip_to_b - clip_to_a,
-                "b_survival_ratio_mse": b_survival_ratio,
-                "a_dominance_ratio_mse": a_dominance_ratio,
             }
         )
 
