@@ -469,16 +469,15 @@ def request_scheduler_video(
             req_queue.put({"requests": pending_miss_batch, "batched": True, "cached": None})
         pending_miss_batch = []
 
-    for _, row in selected_requests.iterrows():
-        if not eval_mode:
-            while time.time() - start_time < row["seconds_from_start"]:
-                time.sleep(0.1)
+    def drain_new_cache_queue():
+        nonlocal index, final_text_embeddings, faiss_cache_ids
+        drained = 0
+        while True:
+            try:
+                cache_data = new_cache_queue.get_nowait()
+            except queue.Empty:
+                break
 
-        request_arrival_time = time.time()
-        row["start_time"] = request_arrival_time
-
-        while not new_cache_queue.empty():
-            cache_data = new_cache_queue.get()
             new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
             new_cached_prompt = cache_data["prompt"]
             new_query_embedding = cache_data["query_embedding"]
@@ -504,6 +503,18 @@ def request_scheduler_video(
             )
             for idx, k in enumerate(k_values):
                 cache.insert(new_cache_id, 0, k, new_cached_latents[idx])
+            drained += 1
+        return drained
+
+    for _, row in selected_requests.iterrows():
+        if not eval_mode:
+            while time.time() - start_time < row["seconds_from_start"]:
+                time.sleep(0.1)
+
+        request_arrival_time = time.time()
+        row["start_time"] = request_arrival_time
+
+        drain_new_cache_queue()
 
         prompt = row["prompt"]
         request_id = row["request_id"]
@@ -650,6 +661,7 @@ def request_scheduler_video(
             last_check_time_queue = current_time
 
     flush_pending_miss_batch()
+    drain_new_cache_queue()
     if eval_mode:
         for _ in range(num_workers):
             req_queue.put(None)
@@ -660,10 +672,13 @@ def request_scheduler_video(
         log_message(log_enabled, "[Scheduler] request list complete, sent shutdown sentinels")
 
     while True:
+        drained = drain_new_cache_queue()
         all_done = all(status in ["finished", "dropped"] for status in worker_status.values())
-        if all_done:
+        if all_done and drained == 0:
             break
-        time.sleep(1)
+        time.sleep(0.1)
+
+    drain_new_cache_queue()
 
 
 def worker_video(
