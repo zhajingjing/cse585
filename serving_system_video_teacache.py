@@ -494,6 +494,7 @@ def request_scheduler_video(
             closest_faiss_pos = indices[0][0]
             closest_cache_id = faiss_cache_ids[closest_faiss_pos]
             closest_prompt = cached_requests[closest_cache_id]
+            closest_prompt_summary = summarize_prompt(closest_prompt)
             closest_texts = processor(
                 text=[closest_prompt],
                 return_tensors="pt",
@@ -535,7 +536,8 @@ def request_scheduler_video(
                     log_message(
                         log_enabled,
                         f"[Scheduler] request={request_id} mode=hit sim={similarity:.3f} "
-                        f"k={k_i} prompt='{summarize_prompt(prompt)}'",
+                        f"k={k_i} prompt='{summarize_prompt(prompt)}' "
+                        f"nearest_prompt='{closest_prompt_summary}'",
                     )
                     cache_stats["hits"] = cache_stats.get("hits", 0) + 1
                     req_queue.put(row.to_dict())
@@ -548,7 +550,8 @@ def request_scheduler_video(
                     log_message(
                         log_enabled,
                         f"[Scheduler] request={request_id} mode=miss reason=cache_lookup_failed "
-                        f"sim={similarity:.3f} prompt='{summarize_prompt(prompt)}'",
+                        f"sim={similarity:.3f} prompt='{summarize_prompt(prompt)}' "
+                        f"nearest_prompt='{closest_prompt_summary}'",
                     )
                     cache_stats["misses"] = cache_stats.get("misses", 0) + 1
                     req_queue.put(row.to_dict())
@@ -560,7 +563,8 @@ def request_scheduler_video(
                 log_message(
                     log_enabled,
                     f"[Scheduler] request={request_id} mode=miss reason=low_similarity "
-                    f"sim={similarity:.3f} prompt='{summarize_prompt(prompt)}'",
+                    f"sim={similarity:.3f} prompt='{summarize_prompt(prompt)}' "
+                    f"nearest_prompt='{closest_prompt_summary}'",
                 )
                 cache_stats["misses"] = cache_stats.get("misses", 0) + 1
                 req_queue.put(row.to_dict())
