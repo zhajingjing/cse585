@@ -1,0 +1,10 @@
+[
+  {"axis": "base",        "prompt_en": "A red vintage convertible with a black leather interior drives down a coastal highway at sunset"},
+  {"axis": "subject",     "prompt_en": "A red vintage motorcycle with a black leather seat drives down a coastal highway at sunset"},
+  {"axis": "setting",     "prompt_en": "A red vintage convertible with a black leather interior drives through a dense snowy mountain pass at sunset"},
+  {"axis": "color",       "prompt_en": "A deep navy blue vintage convertible with a black leather interior drives down a coastal highway at sunset"},
+  {"axis": "motion",      "prompt_en": "A red vintage convertible with a black leather interior sits parked on a coastal highway at sunset"},
+  {"axis": "texture",     "prompt_en": "A rusty weather-beaten vintage convertible with cracked leather interior drives down a coastal highway at sunset"},
+  {"axis": "style",       "prompt_en": "An oil painting of a red vintage convertible with a black leather interior driving down a coastal highway at sunset"},
+  {"axis": "time_of_day", "prompt_en": "A red vintage convertible with a black leather interior drives down a coastal highway under bright midday sun"}
+]
