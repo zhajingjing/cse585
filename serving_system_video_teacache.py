@@ -2,7 +2,7 @@
 Nirvana-style cross-request latent cache for TeaCache video on Wan 2.1 T2V.
 
 Flow:
-1. Encode each incoming prompt with CLIP.
+1. Encode each incoming prompt with T5.
 2. Use FAISS to find the nearest cached prompt.
 3. If similarity is high enough, choose an intermediate latent tier (k in [5, 10, 15]).
 4. Resume Wan denoising from that cached latent for the remaining steps.
@@ -33,8 +33,8 @@ import torch
 import torch.cuda.amp as amp
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn.functional as F
 from tqdm import tqdm
-from transformers import CLIPModel, CLIPProcessor
 
 from eval.teacache.experiments.utils import read_prompt_list
 from serving_system_N import KMinHeapCache
@@ -45,6 +45,7 @@ if WAN_ROOT not in sys.path:
 
 import wan  # noqa: E402
 from wan.configs import SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS  # noqa: E402
+from wan.modules.t5 import T5EncoderModel as WanT5EncoderModel  # noqa: E402
 from wan.utils.fm_solvers import (  # noqa: E402
     FlowDPMSolverMultistepScheduler,
     get_sampling_sigmas,
@@ -63,7 +64,7 @@ DEFAULT_SAMPLE_SOLVER = "unipc"
 DEFAULT_SAMPLE_SHIFT = 5.0
 K_VALUES_VIDEO = [5, 10]
 
-CLIP_MODEL_ID = "openai/clip-vit-large-patch14"
+T5_EMBEDDING_DIM = 4096
 SIMILARITY_THRESHOLD = 0.90
 HIGH_SIMILARITY_THRESHOLD = 0.95
 
@@ -196,29 +197,11 @@ def normalize_cached_latent(cache_latent):
     return cache_latent.contiguous()
 
 
-def get_clip_text_embedding(clip_model, **texts):
-    """
-    Normalize CLIP text embedding extraction across transformers versions.
-
-    Some environments return the projected text embedding tensor from
-    `get_text_features`, while others may surface a model-output object.
-    """
-    text_features = clip_model.get_text_features(**texts)
-    if isinstance(text_features, torch.Tensor):
-        return text_features
-
-    if hasattr(text_features, "pooler_output"):
-        pooled = text_features.pooler_output
-        if hasattr(clip_model, "text_projection"):
-            return clip_model.text_projection(pooled)
-        return pooled
-
-    if hasattr(text_features, "text_embeds"):
-        return text_features.text_embeds
-
-    raise TypeError(
-        f"Unsupported CLIP text feature return type: {type(text_features).__name__}"
-    )
+def get_t5_text_embedding(t5_encoder, prompt, device):
+    """Mean-pool Wan T5 encoder output into a single unit-norm vector."""
+    context = t5_encoder([prompt], device=device)  # list of [seq_len, 4096]
+    emb = context[0].float().mean(0, keepdim=True)  # [1, 4096]
+    return F.normalize(emb, dim=-1).cpu()  # [1, 4096]
 
 
 def wan_generate_with_latent_cache(
@@ -394,7 +377,8 @@ def request_scheduler_video(
     final_text_embeddings,
     k_values,
     worker_status,
-    clip_model_id,
+    t5_ckpt_dir,
+    t5_task,
     num_workers,
     log_enabled=False,
     log_file="request_throughput_video_teacache.csv",
@@ -402,9 +386,15 @@ def request_scheduler_video(
     no_nirvana=False,
     cache_stats=None,
 ):
-    device = "cpu"
-    processor = CLIPProcessor.from_pretrained(clip_model_id)
-    clip_model = CLIPModel.from_pretrained(clip_model_id).to(device)
+    device = torch.device("cpu")
+    cfg = WAN_CONFIGS[t5_task]
+    t5_encoder = WanT5EncoderModel(
+        text_len=cfg.text_len,
+        dtype=torch.float32,
+        device=device,
+        checkpoint_path=os.path.join(t5_ckpt_dir, cfg.t5_checkpoint),
+        tokenizer_path=os.path.join(t5_ckpt_dir, cfg.t5_tokenizer),
+    )
     agg_k_distribution = {k: 0 for k in k_values}
 
     if cache_stats is None:
@@ -456,15 +446,7 @@ def request_scheduler_video(
 
         prompt = row["prompt"]
         request_id = row["request_id"]
-        texts = processor(
-            text=[prompt],
-            return_tensors="pt",
-            truncation=True,
-            padding=True,
-            max_length=77,
-        ).to(device)
-        with torch.no_grad():
-            text_embedding = get_clip_text_embedding(clip_model, **texts).cpu()
+        text_embedding = get_t5_text_embedding(t5_encoder, prompt, device)  # [1, 4096]
 
         if no_nirvana:
             row["cached"] = None
@@ -500,30 +482,12 @@ def request_scheduler_video(
             closest_cache_id = faiss_cache_ids[closest_faiss_pos]
             closest_prompt = cached_requests[closest_cache_id]
             closest_prompt_summary = summarize_prompt(closest_prompt)
-            closest_texts = processor(
-                text=[closest_prompt],
-                return_tensors="pt",
-                truncation=True,
-                padding=True,
-                max_length=77,
-            ).to(device)
-            with torch.no_grad():
-                closest_text_embedding = get_clip_text_embedding(
-                    clip_model, **closest_texts
-                )
+            closest_text_embedding = get_t5_text_embedding(t5_encoder, closest_prompt, device)
 
-            text_embedding_device = text_embedding.to(device)
-            with torch.no_grad():
-                text_norm = text_embedding_device / text_embedding_device.norm(
-                    dim=-1, keepdim=True
-                )
-                closest_text_norm = closest_text_embedding / closest_text_embedding.norm(
-                    dim=-1, keepdim=True
-                )
-                text_similarity_scores = torch.matmul(text_norm, closest_text_norm.T)
-            text_similarity_scores = torch.clamp(text_similarity_scores, min=0)
-            text_embedding = text_embedding_device.cpu()
-            similarity = text_similarity_scores.item()
+            # Both embeddings are already unit-normalized; cosine sim = dot product.
+            similarity = torch.clamp(
+                (text_embedding * closest_text_embedding).sum(), min=0
+            ).item()
 
             if similarity > SIMILARITY_THRESHOLD:
                 if similarity > HIGH_SIMILARITY_THRESHOLD:
@@ -998,7 +962,7 @@ def main():
         }
     )
 
-    embedding_dim = 768
+    embedding_dim = T5_EMBEDDING_DIM
     index = faiss.IndexFlatL2(embedding_dim)
     final_text_embeddings = np.zeros((0, embedding_dim), dtype=np.float32)
     cached_requests = {}
@@ -1035,7 +999,8 @@ def main():
             final_text_embeddings,
             K_VALUES_VIDEO,
             worker_status,
-            CLIP_MODEL_ID,
+            args.ckpt_dir,
+            args.task,
             num_gpus,
         ),
         kwargs={
