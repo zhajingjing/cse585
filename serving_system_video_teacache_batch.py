@@ -64,8 +64,8 @@ DEFAULT_SAMPLE_SHIFT = 5.0
 K_VALUES_VIDEO = [2, 7]
 
 CLIP_MODEL_ID = "openai/clip-vit-large-patch14"
-SIMILARITY_THRESHOLD = 0.85
-HIGH_SIMILARITY_THRESHOLD = 0.90
+SIMILARITY_THRESHOLD = 0.90
+HIGH_SIMILARITY_THRESHOLD = 0.95
 
 
 def summarize_prompt(prompt, max_len=72):
@@ -196,6 +196,18 @@ def normalize_cached_latent(cache_latent):
     return cache_latent.contiguous()
 
 
+def normalize_cached_latent_batch(cache_latent):
+    if isinstance(cache_latent, torch.Tensor):
+        if cache_latent.dim() == 4:
+            return [cache_latent.contiguous()]
+        if cache_latent.dim() == 5:
+            return [latent.contiguous() for latent in cache_latent]
+        raise ValueError(f"Invalid cached latent batch shape: {tuple(cache_latent.shape)}")
+    if isinstance(cache_latent, (list, tuple)):
+        return [normalize_cached_latent(latent) for latent in cache_latent]
+    raise TypeError(f"Unsupported cached latent batch type: {type(cache_latent).__name__}")
+
+
 def get_clip_text_embedding(clip_model, **texts):
     """
     Normalize CLIP text embedding extraction across transformers versions.
@@ -237,6 +249,12 @@ def wan_generate_with_latent_cache(
     cache_latent=None,
     cache_start_step=None,
 ):
+    prompts = input_prompt if isinstance(input_prompt, (list, tuple)) else [input_prompt]
+    prompts = [str(prompt) for prompt in prompts]
+    batch_size = len(prompts)
+    if batch_size == 0:
+        raise ValueError("input_prompt must contain at least one prompt")
+
     if cache_latent is not None and cache_start_step is None:
         raise ValueError("cache_start_step must be provided when cache_latent is used")
     if cache_start_step is not None and not (0 <= cache_start_step < sampling_steps):
@@ -245,7 +263,7 @@ def wan_generate_with_latent_cache(
         )
 
     collect_set = set(collect_latents_at_steps or [])
-    collected_latents = []
+    collected_latents = [[] for _ in range(batch_size)]
 
     F = frame_num
     target_shape = (
@@ -267,38 +285,54 @@ def wan_generate_with_latent_cache(
 
     if n_prompt == "":
         n_prompt = pipeline.sample_neg_prompt
+    if isinstance(n_prompt, str):
+        n_prompts = [n_prompt] * batch_size
+    else:
+        n_prompts = list(n_prompt)
+        if len(n_prompts) != batch_size:
+            raise ValueError("n_prompt batch size must match input_prompt batch size")
 
     seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
-    seed_g = torch.Generator(device=pipeline.device)
-    seed_g.manual_seed(seed)
+    generators = []
+    for idx in range(batch_size):
+        seed_g = torch.Generator(device=pipeline.device)
+        seed_g.manual_seed(seed + idx)
+        generators.append(seed_g)
 
     if not pipeline.t5_cpu:
         pipeline.text_encoder.model.to(pipeline.device)
-        context = pipeline.text_encoder([input_prompt], pipeline.device)
-        context_null = pipeline.text_encoder([n_prompt], pipeline.device)
+        context = pipeline.text_encoder(prompts, pipeline.device)
+        context_null = pipeline.text_encoder(n_prompts, pipeline.device)
         if offload_model:
             pipeline.text_encoder.model.cpu()
     else:
-        context = pipeline.text_encoder([input_prompt], torch.device("cpu"))
-        context_null = pipeline.text_encoder([n_prompt], torch.device("cpu"))
+        context = pipeline.text_encoder(prompts, torch.device("cpu"))
+        context_null = pipeline.text_encoder(n_prompts, torch.device("cpu"))
         context = [t.to(pipeline.device) for t in context]
         context_null = [t.to(pipeline.device) for t in context_null]
 
     if cache_latent is None:
-        latents = [
-            torch.randn(
-                target_shape[0],
-                target_shape[1],
-                target_shape[2],
-                target_shape[3],
-                dtype=torch.float32,
-                device=pipeline.device,
-                generator=seed_g,
+        latents = []
+        for seed_g in generators:
+            latents.append(
+                torch.randn(
+                    target_shape[0],
+                    target_shape[1],
+                    target_shape[2],
+                    target_shape[3],
+                    dtype=torch.float32,
+                    device=pipeline.device,
+                    generator=seed_g,
+                )
             )
-        ]
         start_step = 0
     else:
-        latents = [normalize_cached_latent(cache_latent).to(pipeline.device, dtype=torch.float32)]
+        latents = [
+            latent.to(pipeline.device, dtype=torch.float32)
+            for latent in normalize_cached_latent_batch(cache_latent)
+        ]
+        if len(latents) != batch_size:
+            raise ValueError("cache_latent batch size must match input_prompt batch size")
         start_step = cache_start_step
 
     @contextmanager
@@ -343,23 +377,28 @@ def wan_generate_with_latent_cache(
         x0 = None
         for local_idx, t in enumerate(active_timesteps):
             global_step = start_step + local_idx + 1
-            timestep = torch.stack([t]).to(pipeline.device)
+            timestep = torch.stack([t] * batch_size).to(pipeline.device)
 
-            noise_pred_cond = pipeline.model(latents, t=timestep, **arg_c)[0]
-            noise_pred_uncond = pipeline.model(latents, t=timestep, **arg_null)[0]
-            noise_pred = noise_pred_uncond + guide_scale * (noise_pred_cond - noise_pred_uncond)
-
-            temp_x0 = sample_scheduler.step(
-                noise_pred.unsqueeze(0),
-                t,
-                latents[0].unsqueeze(0),
-                return_dict=False,
-                generator=seed_g,
-            )[0]
-            latents = [temp_x0.squeeze(0)]
+            noise_pred_cond = pipeline.model(latents, t=timestep, **arg_c)
+            noise_pred_uncond = pipeline.model(latents, t=timestep, **arg_null)
+            latents_next = []
+            for idx in range(batch_size):
+                noise_pred = noise_pred_uncond[idx] + guide_scale * (
+                    noise_pred_cond[idx] - noise_pred_uncond[idx]
+                )
+                temp_x0 = sample_scheduler.step(
+                    noise_pred.unsqueeze(0),
+                    t,
+                    latents[idx].unsqueeze(0),
+                    return_dict=False,
+                    generator=generators[idx],
+                )[0]
+                latents_next.append(temp_x0.squeeze(0))
+            latents = latents_next
 
             if global_step in collect_set:
-                collected_latents.append(latents[0].detach().cpu().clone())
+                for idx, latent in enumerate(latents):
+                    collected_latents[idx].append(latent.detach().cpu().clone())
 
             x0 = latents
 
@@ -377,8 +416,8 @@ def wan_generate_with_latent_cache(
         dist.barrier()
 
     if collect_latents_at_steps is not None:
-        return videos[0] if pipeline.rank == 0 else None, collected_latents
-    return videos[0] if pipeline.rank == 0 else None
+        return videos if pipeline.rank == 0 else None, collected_latents
+    return videos if pipeline.rank == 0 else None
 
 
 def request_scheduler_video(
@@ -401,6 +440,7 @@ def request_scheduler_video(
     eval_mode=False,
     no_nirvana=False,
     cache_stats=None,
+    batch_size=1,
 ):
     device = "cpu"
     processor = CLIPProcessor.from_pretrained(clip_model_id)
@@ -417,17 +457,27 @@ def request_scheduler_video(
     last_check_time_queue = time.time()
     request_count_per_min = 0
     size_of_queues = 0
+    pending_miss_batch = []
 
-    for _, row in selected_requests.iterrows():
-        if not eval_mode:
-            while time.time() - start_time < row["seconds_from_start"]:
-                time.sleep(0.1)
+    def flush_pending_miss_batch():
+        nonlocal pending_miss_batch
+        if not pending_miss_batch:
+            return
+        if len(pending_miss_batch) == 1:
+            req_queue.put(pending_miss_batch[0])
+        else:
+            req_queue.put({"requests": pending_miss_batch, "batched": True, "cached": None})
+        pending_miss_batch = []
 
-        request_arrival_time = time.time()
-        row["start_time"] = request_arrival_time
+    def drain_new_cache_queue():
+        nonlocal index, final_text_embeddings, faiss_cache_ids
+        drained = 0
+        while True:
+            try:
+                cache_data = new_cache_queue.get_nowait()
+            except queue.Empty:
+                break
 
-        while not new_cache_queue.empty():
-            cache_data = new_cache_queue.get()
             new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
             new_cached_prompt = cache_data["prompt"]
             new_query_embedding = cache_data["query_embedding"]
@@ -453,6 +503,18 @@ def request_scheduler_video(
             )
             for idx, k in enumerate(k_values):
                 cache.insert(new_cache_id, 0, k, new_cached_latents[idx])
+            drained += 1
+        return drained
+
+    for _, row in selected_requests.iterrows():
+        if not eval_mode:
+            while time.time() - start_time < row["seconds_from_start"]:
+                time.sleep(0.1)
+
+        request_arrival_time = time.time()
+        row["start_time"] = request_arrival_time
+
+        drain_new_cache_queue()
 
         prompt = row["prompt"]
         request_id = row["request_id"]
@@ -477,7 +539,9 @@ def request_scheduler_video(
                 f"prompt='{summarize_prompt(prompt)}'",
             )
             cache_stats["misses"] = cache_stats.get("misses", 0) + 1
-            req_queue.put(row.to_dict())
+            pending_miss_batch.append(row.to_dict())
+            if len(pending_miss_batch) >= batch_size:
+                flush_pending_miss_batch()
             continue
 
         query_embedding = text_embedding.numpy().reshape(1, -1).astype(np.float32)
@@ -493,7 +557,9 @@ def request_scheduler_video(
                 f"prompt='{summarize_prompt(prompt)}'",
             )
             cache_stats["misses"] = cache_stats.get("misses", 0) + 1
-            req_queue.put(row.to_dict())
+            pending_miss_batch.append(row.to_dict())
+            if len(pending_miss_batch) >= batch_size:
+                flush_pending_miss_batch()
         else:
             distances, indices = index.search(query_embedding, k=1)
             closest_faiss_pos = indices[0][0]
@@ -545,6 +611,7 @@ def request_scheduler_video(
                         f"nearest_prompt='{closest_prompt_summary}'",
                     )
                     cache_stats["hits"] = cache_stats.get("hits", 0) + 1
+                    flush_pending_miss_batch()
                     req_queue.put(row.to_dict())
                     agg_k_distribution[k_i] += 1
                 else:
@@ -559,7 +626,9 @@ def request_scheduler_video(
                         f"nearest_prompt='{closest_prompt_summary}'",
                     )
                     cache_stats["misses"] = cache_stats.get("misses", 0) + 1
-                    req_queue.put(row.to_dict())
+                    pending_miss_batch.append(row.to_dict())
+                    if len(pending_miss_batch) >= batch_size:
+                        flush_pending_miss_batch()
             else:
                 row["cached"] = None
                 row["k"] = None
@@ -572,7 +641,9 @@ def request_scheduler_video(
                     f"nearest_prompt='{closest_prompt_summary}'",
                 )
                 cache_stats["misses"] = cache_stats.get("misses", 0) + 1
-                req_queue.put(row.to_dict())
+                pending_miss_batch.append(row.to_dict())
+                if len(pending_miss_batch) >= batch_size:
+                    flush_pending_miss_batch()
 
         request_count_per_min += 1
         current_time = time.time()
@@ -589,6 +660,8 @@ def request_scheduler_video(
             request_count_per_min = 0
             last_check_time_queue = current_time
 
+    flush_pending_miss_batch()
+    drain_new_cache_queue()
     if eval_mode:
         for _ in range(num_workers):
             req_queue.put(None)
@@ -599,10 +672,13 @@ def request_scheduler_video(
         log_message(log_enabled, "[Scheduler] request list complete, sent shutdown sentinels")
 
     while True:
+        drained = drain_new_cache_queue()
         all_done = all(status in ["finished", "dropped"] for status in worker_status.values())
-        if all_done:
+        if all_done and drained == 0:
             break
-        time.sleep(1)
+        time.sleep(0.1)
+
+    drain_new_cache_queue()
 
 
 def worker_video(
@@ -628,6 +704,7 @@ def worker_video(
     eval_mode,
     loop=1,
     no_nirvana=False,
+    batch_size=1,
 ):
     torch.cuda.set_device(gpu_id)
 
@@ -668,25 +745,27 @@ def worker_video(
                 break
             process_start = time.time()
             idle_counter = 0
-            prompt = request["prompt"]
-            request_id = request.get("request_id", "unknown")
-            cache_mode = "hit" if request["cached"] else "miss"
+            requests = request.get("requests") if isinstance(request, dict) and request.get("batched") else [request]
+            prompts = [req["prompt"] for req in requests]
+            request_ids = [req.get("request_id", "unknown") for req in requests]
+            cache_modes = ["hit" if req["cached"] else "miss" for req in requests]
+            all_misses = all(req["cached"] is None for req in requests)
+            batch_mode = "miss_batch" if len(requests) > 1 and all_misses else cache_modes[0]
             log_message(
                 log_enabled,
-                f"[Worker {gpu_id}] request={request_id} start mode={cache_mode} "
-                f"prompt='{summarize_prompt(prompt)}'",
+                f"[Worker {gpu_id}] requests={request_ids} start mode={batch_mode} "
+                f"batch_size={len(requests)}",
             )
 
             for l in range(loop):
-                out_path = os.path.join(video_directory, f"{prompt}-{l}.mp4")
                 generation_start = time.time()
                 log_message(
                     log_enabled,
-                    f"[Worker {gpu_id}] request={request_id} generation={l + 1}/{loop} "
-                    f"status=started mode={cache_mode}",
+                    f"[Worker {gpu_id}] requests={request_ids} generation={l + 1}/{loop} "
+                    f"status=started mode={batch_mode}",
                 )
 
-                if request["cached"] is None:
+                if len(requests) > 1:
                     if disable_teacache:
                         disable_wan_teacache(pipeline.model)
                     else:
@@ -700,104 +779,177 @@ def worker_video(
                         )
                     collect_latents = tuple(K_VALUES_VIDEO) if l == 0 else None
                     result = pipeline.generate(
-                        prompt,
+                        prompts,
                         size=video_size,
                         frame_num=num_frames,
                         shift=sample_shift,
                         sample_solver=sample_solver,
                         sampling_steps=sampling_steps,
                         guide_scale=guide_scale,
-                        seed=l,
+                        seed=l * max(batch_size, 1),
                         offload_model=offload_model,
                         collect_latents_at_steps=collect_latents,
                     )
                     if isinstance(result, tuple):
-                        video, collected_latents = result
+                        videos, collected_latents_batch = result
                     else:
-                        video = result
-                        collected_latents = None
+                        videos = result
+                        collected_latents_batch = None
 
-                    cache_video(
-                        tensor=video[None],
-                        save_file=out_path,
-                        fps=cfg.sample_fps,
-                        nrow=1,
-                        normalize=True,
-                        value_range=(-1, 1),
-                    )
-
-                    if (
-                        not no_nirvana
-                        and collected_latents is not None
-                        and request.get("query_embedding") is not None
-                    ):
-                        cached_latents = [z.cpu().clone() for z in collected_latents]
-                        qe = request["query_embedding"]
-                        qe_np = (
-                            qe.numpy().reshape(1, -1)
-                            if hasattr(qe, "numpy")
-                            else np.array(qe).reshape(1, -1)
-                        ).astype(np.float32)
-                        new_cache_queue.put(
-                            {
-                                "cache_id": request_id,
-                                "cached_latents": cached_latents,
-                                "prompt": prompt,
-                                "query_embedding": qe_np,
-                            }
+                    for idx, req in enumerate(requests):
+                        prompt = req["prompt"]
+                        request_id = req.get("request_id", "unknown")
+                        out_path = os.path.join(video_directory, f"{prompt}-{l}.mp4")
+                        video = videos[idx]
+                        cache_video(
+                            tensor=video[None],
+                            save_file=out_path,
+                            fps=cfg.sample_fps,
+                            nrow=1,
+                            normalize=True,
+                            value_range=(-1, 1),
                         )
+                        if (
+                            not no_nirvana
+                            and collected_latents_batch is not None
+                            and req.get("query_embedding") is not None
+                        ):
+                            cached_latents = [z.cpu().clone() for z in collected_latents_batch[idx]]
+                            qe = req["query_embedding"]
+                            qe_np = (
+                                qe.numpy().reshape(1, -1)
+                                if hasattr(qe, "numpy")
+                                else np.array(qe).reshape(1, -1)
+                            ).astype(np.float32)
+                            new_cache_queue.put(
+                                {
+                                    "cache_id": request_id,
+                                    "cached_latents": cached_latents,
+                                    "prompt": prompt,
+                                    "query_embedding": qe_np,
+                                }
+                            )
                 else:
-                    cache_latent = normalize_cached_latent(request["latent"])
-                    k = request["k"]
-                    remaining_steps = sampling_steps - k
-                    if disable_teacache:
-                        disable_wan_teacache(pipeline.model)
-                    else:
-                        configure_wan_teacache(
-                            pipeline.model,
-                            checkpoint_dir=ckpt_dir,
-                            sampling_steps=remaining_steps,
-                            teacache_thresh=teacache_thresh,
-                            use_ret_steps=use_ret_steps,
+                    request_item = requests[0]
+                    prompt = request_item["prompt"]
+                    request_id = request_item.get("request_id", "unknown")
+                    out_path = os.path.join(video_directory, f"{prompt}-{l}.mp4")
+                    if request_item["cached"] is None:
+                        if disable_teacache:
+                            disable_wan_teacache(pipeline.model)
+                        else:
+                            reset_wan_teacache_state(pipeline.model)
+                            configure_wan_teacache(
+                                pipeline.model,
+                                checkpoint_dir=ckpt_dir,
+                                sampling_steps=sampling_steps,
+                                teacache_thresh=teacache_thresh,
+                                use_ret_steps=use_ret_steps,
+                            )
+                        collect_latents = tuple(K_VALUES_VIDEO) if l == 0 else None
+                        result = pipeline.generate(
+                            prompt,
+                            size=video_size,
+                            frame_num=num_frames,
+                            shift=sample_shift,
+                            sample_solver=sample_solver,
+                            sampling_steps=sampling_steps,
+                            guide_scale=guide_scale,
+                            seed=l,
+                            offload_model=offload_model,
+                            collect_latents_at_steps=collect_latents,
                         )
-                    result = pipeline.generate(
-                        prompt,
-                        size=video_size,
-                        frame_num=num_frames,
-                        shift=sample_shift,
-                        sample_solver=sample_solver,
-                        sampling_steps=sampling_steps,
-                        guide_scale=guide_scale,
-                        seed=l,
-                        offload_model=offload_model,
-                        cache_latent=cache_latent,
-                        cache_start_step=k,
-                    )
-                    video = result[0] if isinstance(result, tuple) else result
-                    cache_video(
-                        tensor=video[None],
-                        save_file=out_path,
-                        fps=cfg.sample_fps,
-                        nrow=1,
-                        normalize=True,
-                        value_range=(-1, 1),
-                    )
+                        if isinstance(result, tuple):
+                            videos, collected_latents_batch = result
+                            video = videos[0]
+                            collected_latents = collected_latents_batch[0]
+                        else:
+                            video = result[0] if isinstance(result, list) else result
+                            collected_latents = None
+
+                        cache_video(
+                            tensor=video[None],
+                            save_file=out_path,
+                            fps=cfg.sample_fps,
+                            nrow=1,
+                            normalize=True,
+                            value_range=(-1, 1),
+                        )
+
+                        if (
+                            not no_nirvana
+                            and collected_latents is not None
+                            and request_item.get("query_embedding") is not None
+                        ):
+                            cached_latents = [z.cpu().clone() for z in collected_latents]
+                            qe = request_item["query_embedding"]
+                            qe_np = (
+                                qe.numpy().reshape(1, -1)
+                                if hasattr(qe, "numpy")
+                                else np.array(qe).reshape(1, -1)
+                            ).astype(np.float32)
+                            new_cache_queue.put(
+                                {
+                                    "cache_id": request_id,
+                                    "cached_latents": cached_latents,
+                                    "prompt": prompt,
+                                    "query_embedding": qe_np,
+                                }
+                            )
+                    else:
+                        cache_latent = normalize_cached_latent(request_item["latent"])
+                        k = request_item["k"]
+                        remaining_steps = sampling_steps - k
+                        if disable_teacache:
+                            disable_wan_teacache(pipeline.model)
+                        else:
+                            configure_wan_teacache(
+                                pipeline.model,
+                                checkpoint_dir=ckpt_dir,
+                                sampling_steps=remaining_steps,
+                                teacache_thresh=teacache_thresh,
+                                use_ret_steps=use_ret_steps,
+                            )
+                        result = pipeline.generate(
+                            prompt,
+                            size=video_size,
+                            frame_num=num_frames,
+                            shift=sample_shift,
+                            sample_solver=sample_solver,
+                            sampling_steps=sampling_steps,
+                            guide_scale=guide_scale,
+                            seed=l,
+                            offload_model=offload_model,
+                            cache_latent=cache_latent,
+                            cache_start_step=k,
+                        )
+                        video = result[0] if isinstance(result, list) else result
+                        cache_video(
+                            tensor=video[None],
+                            save_file=out_path,
+                            fps=cfg.sample_fps,
+                            nrow=1,
+                            normalize=True,
+                            value_range=(-1, 1),
+                        )
 
                 generation_elapsed = time.time() - generation_start
                 log_message(
                     log_enabled,
-                    f"[Worker {gpu_id}] request={request_id} generation={l + 1}/{loop} "
-                    f"status=finished elapsed={generation_elapsed:.2f}s output='{out_path}'",
+                    f"[Worker {gpu_id}] requests={request_ids} generation={l + 1}/{loop} "
+                    f"status=finished elapsed={generation_elapsed:.2f}s",
                 )
 
-            finish_time = time.time() - request["start_time"]
             pure_processing_time = time.time() - process_start
-            log_message(
-                log_enabled,
-                f"[Worker {gpu_id}] request={request_id} completed "
-                f"queue_to_finish={finish_time:.2f}s processing={pure_processing_time:.2f}s",
-            )
-            latency_queue.put((finish_time, pure_processing_time))
+            for req in requests:
+                finish_time = time.time() - req["start_time"]
+                request_id = req.get("request_id", "unknown")
+                log_message(
+                    log_enabled,
+                    f"[Worker {gpu_id}] request={request_id} completed "
+                    f"queue_to_finish={finish_time:.2f}s processing={pure_processing_time:.2f}s",
+                )
+                latency_queue.put((finish_time, pure_processing_time))
         except queue.Empty:
             idle_counter += 1
             if idle_counter >= max_idle_iterations:
@@ -927,6 +1079,12 @@ def main():
         help="Videos per prompt; only the first miss writes Nirvana cache",
     )
     parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Batch size for full-generation miss requests; cache-hit resume requests stay single-item",
+    )
+    parser.add_argument(
         "--eval_mode",
         action="store_true",
         help="No request timing: submit all prompts at once and run as fast as possible",
@@ -963,6 +1121,8 @@ def main():
         raise ValueError(
             f"--sample_steps must be greater than max cache step {max(K_VALUES_VIDEO)}"
         )
+    if args.batch_size < 1:
+        raise ValueError("--batch_size must be at least 1")
 
     os.makedirs(args.video_directory, exist_ok=True)
     num_gpus = torch.cuda.device_count()
@@ -1044,6 +1204,7 @@ def main():
             "eval_mode": args.eval_mode,
             "no_nirvana": args.no_nirvana,
             "cache_stats": cache_stats,
+            "batch_size": args.batch_size,
         },
     )
     scheduler.start()
@@ -1076,6 +1237,7 @@ def main():
                 args.eval_mode,
                 args.loop,
                 args.no_nirvana,
+                args.batch_size,
             ),
         )
         p.start()
