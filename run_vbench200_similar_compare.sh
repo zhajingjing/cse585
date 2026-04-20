@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+SERVING_SCRIPT="${SERVING_SCRIPT:-$ROOT_DIR/serving_system_video_teacache.py}"
+
+DEFAULT_CKPT_DIR="/root/autodl-tmp/Wan2.1-T2V-1.3B"
+CKPT_DIR="${1:-${CKPT_DIR:-$DEFAULT_CKPT_DIR}}"
+
+TASK="${TASK:-t2v-1.3B}"
+SIZE="${SIZE:-832*480}"
+NUM_FRAMES="${NUM_FRAMES:-49}"
+SAMPLE_STEPS="${SAMPLE_STEPS:-50}"
+SAMPLE_SOLVER="${SAMPLE_SOLVER:-unipc}"
+SAMPLE_SHIFT="${SAMPLE_SHIFT:-5.0}"
+GUIDE_SCALE="${GUIDE_SCALE:-5.0}"
+TEACACHE_THRESH="${TEACACHE_THRESH:-0.2}"
+CACHE_SIZE="${CACHE_SIZE:-1000}"
+LOOP="${LOOP:-1}"
+NUM_REQ="${NUM_REQ:-200}"
+REQUEST_INTERVAL_SECONDS="${REQUEST_INTERVAL_SECONDS:-}"
+ENABLE_LOG="${ENABLE_LOG:-1}"
+EXTRA_ARGS="${EXTRA_ARGS:-}"
+
+WORKLOAD_PATH="${WORKLOAD_PATH:-$ROOT_DIR/eval/teacache/vbench/VBench_200_similar.json}"
+if [[ ! -f "$WORKLOAD_PATH" ]]; then
+  echo "Missing workload file: $WORKLOAD_PATH" >&2
+  exit 1
+fi
+
+RUN_STAMP="${RUN_STAMP:-$(date +"%Y%m%d_%H%M%S")}"
+OUT_ROOT="${OUT_ROOT:-$ROOT_DIR/vbench200_similar_runs/$RUN_STAMP}"
+SUMMARY_CSV="$OUT_ROOT/summary.csv"
+
+mkdir -p "$OUT_ROOT"
+echo "method,run_dir,console_log,throughput_csv,total_wall_time_s,latency_min_s,latency_max_s,latency_avg_s,latency_n,processing_min_s,processing_max_s,processing_avg_s,processing_n,cache_hits,cache_total,cache_hit_rate_pct" > "$SUMMARY_CSV"
+
+extract_metric() {
+  local pattern="$1"
+  local file="$2"
+  grep -oE "$pattern" "$file" | head -n1 || true
+}
+
+append_summary_row() {
+  local method="$1"
+  local run_dir="$2"
+  local console_log="$3"
+  local throughput_csv="$4"
+
+  local wall latency_line proc_line cache_line
+  wall="$(extract_metric '\[Total wall time\] [0-9.]+s' "$console_log" | grep -oE '[0-9.]+')"
+  latency_line="$(grep '\[Per-request latency\]' "$console_log" | tail -n1 || true)"
+  proc_line="$(grep '\[Pure processing time\]' "$console_log" | tail -n1 || true)"
+  cache_line="$(grep '\[Cache hit rate\]' "$console_log" | tail -n1 || true)"
+
+  local lat_min="" lat_max="" lat_avg="" lat_n=""
+  local proc_min="" proc_max="" proc_avg="" proc_n=""
+  local cache_hits="" cache_total="" cache_pct=""
+
+  if [[ -n "$latency_line" ]]; then
+    lat_min="$(echo "$latency_line" | sed -n 's/.*min=\([0-9.]*\)s.*/\1/p')"
+    lat_max="$(echo "$latency_line" | sed -n 's/.*max=\([0-9.]*\)s.*/\1/p')"
+    lat_avg="$(echo "$latency_line" | sed -n 's/.*avg=\([0-9.]*\)s.*/\1/p')"
+    lat_n="$(echo "$latency_line" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')"
+  fi
+
+  if [[ -n "$proc_line" ]]; then
+    proc_min="$(echo "$proc_line" | sed -n 's/.*min=\([0-9.]*\)s.*/\1/p')"
+    proc_max="$(echo "$proc_line" | sed -n 's/.*max=\([0-9.]*\)s.*/\1/p')"
+    proc_avg="$(echo "$proc_line" | sed -n 's/.*avg=\([0-9.]*\)s.*/\1/p')"
+    proc_n="$(echo "$proc_line" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')"
+  fi
+
+  if [[ "$cache_line" == *"N/A"* ]]; then
+    cache_hits="0"
+    cache_total="0"
+    cache_pct="0"
+  elif [[ -n "$cache_line" ]]; then
+    cache_hits="$(echo "$cache_line" | sed -n 's/.*] \([0-9]*\)\/\([0-9]*\) = \([0-9.]*\)%.*/\1/p')"
+    cache_total="$(echo "$cache_line" | sed -n 's/.*] \([0-9]*\)\/\([0-9]*\) = \([0-9.]*\)%.*/\2/p')"
+    cache_pct="$(echo "$cache_line" | sed -n 's/.*] \([0-9]*\)\/\([0-9]*\) = \([0-9.]*\)%.*/\3/p')"
+  fi
+
+  echo "$method,$run_dir,$console_log,$throughput_csv,$wall,$lat_min,$lat_max,$lat_avg,$lat_n,$proc_min,$proc_max,$proc_avg,$proc_n,$cache_hits,$cache_total,$cache_pct" >> "$SUMMARY_CSV"
+}
+
+run_method() {
+  local method="$1"
+  local extra_method_flag="$2"
+
+  local run_dir="$OUT_ROOT/$method"
+  local video_dir="$run_dir/videos"
+  local console_log="$run_dir/console.log"
+  local throughput_csv="$run_dir/request_throughput.csv"
+  local command_txt="$run_dir/command.txt"
+  mkdir -p "$video_dir"
+
+  local -a cmd=(
+    "$PYTHON_BIN" "$SERVING_SCRIPT"
+    "--ckpt_dir" "$CKPT_DIR"
+    "--task" "$TASK"
+    "--prompt_list" "$WORKLOAD_PATH"
+    "--video_directory" "$video_dir"
+    "--cache_size" "$CACHE_SIZE"
+    "--size" "$SIZE"
+    "--num_frames" "$NUM_FRAMES"
+    "--sample_steps" "$SAMPLE_STEPS"
+    "--sample_solver" "$SAMPLE_SOLVER"
+    "--sample_shift" "$SAMPLE_SHIFT"
+    "--guide_scale" "$GUIDE_SCALE"
+    "--teacache_thresh" "$TEACACHE_THRESH"
+    "--loop" "$LOOP"
+    "--num_req" "$NUM_REQ"
+    "--log_file" "$throughput_csv"
+  )
+
+  if [[ -n "$REQUEST_INTERVAL_SECONDS" ]]; then
+    cmd+=("--request_interval_seconds" "$REQUEST_INTERVAL_SECONDS")
+  fi
+  if [[ "$ENABLE_LOG" == "1" ]]; then
+    cmd+=("--log")
+  fi
+  if [[ -n "$extra_method_flag" ]]; then
+    cmd+=("$extra_method_flag")
+  fi
+  if [[ -n "$EXTRA_ARGS" ]]; then
+    # shellcheck disable=SC2206
+    local extra_args_array=($EXTRA_ARGS)
+    cmd+=("${extra_args_array[@]}")
+  fi
+
+  printf '%q ' "${cmd[@]}" > "$command_txt"
+  echo >> "$command_txt"
+
+  echo
+  echo "=== Running method=$method ==="
+  echo "Workload: $WORKLOAD_PATH"
+  echo "Run dir:  $run_dir"
+
+  "${cmd[@]}" 2>&1 | tee "$console_log"
+  append_summary_row "$method" "$run_dir" "$console_log" "$throughput_csv"
+}
+
+echo "Output root: $OUT_ROOT"
+echo "Checkpoint:  $CKPT_DIR"
+echo "Workload:    $WORKLOAD_PATH"
+
+run_method "nirvana_teacache" ""
+run_method "teacache_only" "--no_nirvana"
+
+echo
+echo "Finished runs."
+echo "Summary written to: $SUMMARY_CSV"
