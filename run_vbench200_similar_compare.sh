@@ -34,7 +34,7 @@ OUT_ROOT="${OUT_ROOT:-$ROOT_DIR/vbench200_similar_runs/$RUN_STAMP}"
 SUMMARY_CSV="$OUT_ROOT/summary.csv"
 
 mkdir -p "$OUT_ROOT"
-echo "method,run_dir,console_log,throughput_csv,total_wall_time_s,latency_min_s,latency_max_s,latency_avg_s,latency_n,processing_min_s,processing_max_s,processing_avg_s,processing_n,cache_hits,cache_total,cache_hit_rate_pct" > "$SUMMARY_CSV"
+echo "method,run_dir,console_log,throughput_csv,total_wall_time_s,latency_min_s,latency_max_s,latency_avg_s,latency_n,processing_min_s,processing_max_s,processing_avg_s,processing_n,hit_proc_min_s,hit_proc_max_s,hit_proc_avg_s,hit_proc_n,miss_proc_min_s,miss_proc_max_s,miss_proc_avg_s,miss_proc_n,hit_gen_min_s,hit_gen_max_s,hit_gen_avg_s,hit_gen_n,miss_gen_min_s,miss_gen_max_s,miss_gen_avg_s,miss_gen_n,vsearch_min_ms,vsearch_max_ms,vsearch_avg_ms,vsearch_n,retrieval_min_ms,retrieval_max_ms,retrieval_avg_ms,retrieval_n,cache_hits,cache_total,cache_hit_rate_pct" > "$SUMMARY_CSV"
 
 extract_metric() {
   local pattern="$1"
@@ -48,41 +48,63 @@ append_summary_row() {
   local console_log="$3"
   local throughput_csv="$4"
 
-  local wall latency_line proc_line cache_line
+  local wall latency_line proc_line hit_proc_line miss_proc_line
+  local hit_gen_line miss_gen_line vsearch_line retrieval_line cache_line
   wall="$(extract_metric '\[Total wall time\] [0-9.]+s' "$console_log" | grep -oE '[0-9.]+')"
   latency_line="$(grep '\[Per-request latency\]' "$console_log" | tail -n1 || true)"
   proc_line="$(grep '\[Pure processing time\]' "$console_log" | tail -n1 || true)"
+  hit_proc_line="$(grep '\[Hit processing time\]' "$console_log" | tail -n1 || true)"
+  miss_proc_line="$(grep '\[Miss processing time\]' "$console_log" | tail -n1 || true)"
+  hit_gen_line="$(grep '\[Hit generation time\]' "$console_log" | tail -n1 || true)"
+  miss_gen_line="$(grep '\[Miss generation time\]' "$console_log" | tail -n1 || true)"
+  vsearch_line="$(grep '\[Vector search time\]' "$console_log" | tail -n1 || true)"
+  retrieval_line="$(grep '\[Cache retrieval time\]' "$console_log" | tail -n1 || true)"
   cache_line="$(grep '\[Cache hit rate\]' "$console_log" | tail -n1 || true)"
 
   local lat_min="" lat_max="" lat_avg="" lat_n=""
   local proc_min="" proc_max="" proc_avg="" proc_n=""
+  local hit_proc_min="" hit_proc_max="" hit_proc_avg="" hit_proc_n=""
+  local miss_proc_min="" miss_proc_max="" miss_proc_avg="" miss_proc_n=""
+  local hit_gen_min="" hit_gen_max="" hit_gen_avg="" hit_gen_n=""
+  local miss_gen_min="" miss_gen_max="" miss_gen_avg="" miss_gen_n=""
+  local vsearch_min="" vsearch_max="" vsearch_avg="" vsearch_n=""
+  local retrieval_min="" retrieval_max="" retrieval_avg="" retrieval_n=""
   local cache_hits="" cache_total="" cache_pct=""
 
-  if [[ -n "$latency_line" ]]; then
-    lat_min="$(echo "$latency_line" | sed -n 's/.*min=\([0-9.]*\)s.*/\1/p')"
-    lat_max="$(echo "$latency_line" | sed -n 's/.*max=\([0-9.]*\)s.*/\1/p')"
-    lat_avg="$(echo "$latency_line" | sed -n 's/.*avg=\([0-9.]*\)s.*/\1/p')"
-    lat_n="$(echo "$latency_line" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')"
-  fi
+  parse_s_line() {
+    local line="$1" pfx="$2"
+    eval "${pfx}_min=\"\$(echo \"\$line\" | sed -n 's/.*min=\([0-9.]*\)s.*/\1/p')\""
+    eval "${pfx}_max=\"\$(echo \"\$line\" | sed -n 's/.*max=\([0-9.]*\)s.*/\1/p')\""
+    eval "${pfx}_avg=\"\$(echo \"\$line\" | sed -n 's/.*avg=\([0-9.]*\)s.*/\1/p')\""
+    eval "${pfx}_n=\"\$(echo \"\$line\" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')\""
+  }
 
-  if [[ -n "$proc_line" ]]; then
-    proc_min="$(echo "$proc_line" | sed -n 's/.*min=\([0-9.]*\)s.*/\1/p')"
-    proc_max="$(echo "$proc_line" | sed -n 's/.*max=\([0-9.]*\)s.*/\1/p')"
-    proc_avg="$(echo "$proc_line" | sed -n 's/.*avg=\([0-9.]*\)s.*/\1/p')"
-    proc_n="$(echo "$proc_line" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')"
-  fi
+  parse_ms_line() {
+    local line="$1" pfx="$2"
+    eval "${pfx}_min=\"\$(echo \"\$line\" | sed -n 's/.*min=\([0-9.]*\)ms.*/\1/p')\""
+    eval "${pfx}_max=\"\$(echo \"\$line\" | sed -n 's/.*max=\([0-9.]*\)ms.*/\1/p')\""
+    eval "${pfx}_avg=\"\$(echo \"\$line\" | sed -n 's/.*avg=\([0-9.]*\)ms.*/\1/p')\""
+    eval "${pfx}_n=\"\$(echo \"\$line\" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')\""
+  }
+
+  [[ -n "$latency_line" ]]   && parse_s_line  "$latency_line"   lat
+  [[ -n "$proc_line" ]]      && parse_s_line  "$proc_line"      proc
+  [[ -n "$hit_proc_line" ]]  && parse_s_line  "$hit_proc_line"  hit_proc
+  [[ -n "$miss_proc_line" ]] && parse_s_line  "$miss_proc_line" miss_proc
+  [[ -n "$hit_gen_line" ]]   && parse_s_line  "$hit_gen_line"   hit_gen
+  [[ -n "$miss_gen_line" ]]  && parse_s_line  "$miss_gen_line"  miss_gen
+  [[ -n "$vsearch_line" ]]   && parse_ms_line "$vsearch_line"   vsearch
+  [[ -n "$retrieval_line" ]] && parse_ms_line "$retrieval_line" retrieval
 
   if [[ "$cache_line" == *"N/A"* ]]; then
-    cache_hits="0"
-    cache_total="0"
-    cache_pct="0"
+    cache_hits="0"; cache_total="0"; cache_pct="0"
   elif [[ -n "$cache_line" ]]; then
     cache_hits="$(echo "$cache_line" | sed -n 's/.*] \([0-9]*\)\/\([0-9]*\) = \([0-9.]*\)%.*/\1/p')"
     cache_total="$(echo "$cache_line" | sed -n 's/.*] \([0-9]*\)\/\([0-9]*\) = \([0-9.]*\)%.*/\2/p')"
     cache_pct="$(echo "$cache_line" | sed -n 's/.*] \([0-9]*\)\/\([0-9]*\) = \([0-9.]*\)%.*/\3/p')"
   fi
 
-  echo "$method,$run_dir,$console_log,$throughput_csv,$wall,$lat_min,$lat_max,$lat_avg,$lat_n,$proc_min,$proc_max,$proc_avg,$proc_n,$cache_hits,$cache_total,$cache_pct" >> "$SUMMARY_CSV"
+  echo "$method,$run_dir,$console_log,$throughput_csv,$wall,$lat_min,$lat_max,$lat_avg,$lat_n,$proc_min,$proc_max,$proc_avg,$proc_n,$hit_proc_min,$hit_proc_max,$hit_proc_avg,$hit_proc_n,$miss_proc_min,$miss_proc_max,$miss_proc_avg,$miss_proc_n,$hit_gen_min,$hit_gen_max,$hit_gen_avg,$hit_gen_n,$miss_gen_min,$miss_gen_max,$miss_gen_avg,$miss_gen_n,$vsearch_min,$vsearch_max,$vsearch_avg,$vsearch_n,$retrieval_min,$retrieval_max,$retrieval_avg,$retrieval_n,$cache_hits,$cache_total,$cache_pct" >> "$SUMMARY_CSV"
 }
 
 run_method() {

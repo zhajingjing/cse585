@@ -426,6 +426,9 @@ def request_scheduler_video(
         request_arrival_time = time.time()
         row["start_time"] = request_arrival_time
 
+        # 1. ENCODING & VECTOR SEARCH TIME
+        search_start = time.perf_counter()
+
         while not new_cache_queue.empty():
             cache_data = new_cache_queue.get()
             new_cached_latents = [z.clone() for z in cache_data["cached_latents"]]
@@ -524,6 +527,8 @@ def request_scheduler_video(
             text_similarity_scores = torch.clamp(text_similarity_scores, min=0)
             text_embedding = text_embedding_device.cpu()
             similarity = text_similarity_scores.item()
+            search_end = time.perf_counter()
+            row["vector_search_ms"] = (search_end - search_start) * 1000
 
             if similarity > SIMILARITY_THRESHOLD:
                 if similarity > HIGH_SIMILARITY_THRESHOLD:
@@ -531,7 +536,11 @@ def request_scheduler_video(
                 else:
                     closest_index = 2
 
+                retrieval_start = time.perf_counter()
                 best_candidate = cache.retrieve(closest_index, closest_cache_id)
+                retrieval_end = time.perf_counter()
+                row["cache_retrieval_ms"] = (retrieval_end - retrieval_start) * 1000
+
                 if best_candidate:
                     _, (_, k_i, latent) = best_candidate
                     row["cached"] = True
@@ -574,6 +583,8 @@ def request_scheduler_video(
                 cache_stats["misses"] = cache_stats.get("misses", 0) + 1
                 req_queue.put(row.to_dict())
 
+        row["queue_entry_time"] = time.time()
+        
         request_count_per_min += 1
         current_time = time.time()
         if current_time - last_check_time_queue >= 60:
@@ -671,6 +682,7 @@ def worker_video(
             prompt = request["prompt"]
             request_id = request.get("request_id", "unknown")
             cache_mode = "hit" if request["cached"] else "miss"
+            generation_total_elapsed = 0.0
             log_message(
                 log_enabled,
                 f"[Worker {gpu_id}] request={request_id} start mode={cache_mode} "
@@ -784,6 +796,7 @@ def worker_video(
                     )
 
                 generation_elapsed = time.time() - generation_start
+                generation_total_elapsed += generation_elapsed
                 log_message(
                     log_enabled,
                     f"[Worker {gpu_id}] request={request_id} generation={l + 1}/{loop} "
@@ -795,9 +808,17 @@ def worker_video(
             log_message(
                 log_enabled,
                 f"[Worker {gpu_id}] request={request_id} completed "
-                f"queue_to_finish={finish_time:.2f}s processing={pure_processing_time:.2f}s",
+                f"queue_to_finish={finish_time:.2f}s processing={pure_processing_time:.2f}s "
+                f"generation={generation_total_elapsed:.2f}s",
             )
-            latency_queue.put((finish_time, pure_processing_time))
+            latency_queue.put((
+                finish_time,
+                pure_processing_time,
+                cache_mode,
+                generation_total_elapsed,
+                float(request.get("vector_search_ms") or 0),
+                float(request.get("cache_retrieval_ms") or 0),
+            ))
         except queue.Empty:
             idle_counter += 1
             if idle_counter >= max_idle_iterations:
@@ -1084,11 +1105,27 @@ def main():
     total_requests = len(prompts)
     all_latencies = []
     all_processing_times = []
+    hit_processing_times = []
+    miss_processing_times = []
+    hit_generation_times = []
+    miss_generation_times = []
+    all_vector_search_ms = []
+    all_cache_retrieval_ms = []
     with tqdm(total=total_requests, desc="Requests", unit="req") as pbar:
         for _ in range(total_requests):
-            finish_time, pure_processing_time = latency_queue.get()
+            finish_time, pure_processing_time, cache_mode, gen_s, vsearch_ms, retrieval_ms = latency_queue.get()
             all_latencies.append(finish_time)
             all_processing_times.append(pure_processing_time)
+            if cache_mode == "hit":
+                hit_processing_times.append(pure_processing_time)
+                hit_generation_times.append(gen_s)
+            else:
+                miss_processing_times.append(pure_processing_time)
+                miss_generation_times.append(gen_s)
+            if vsearch_ms > 0:
+                all_vector_search_ms.append(vsearch_ms)
+            if retrieval_ms > 0:
+                all_cache_retrieval_ms.append(retrieval_ms)
             pbar.update(1)
 
     for p in workers:
@@ -1104,6 +1141,30 @@ def main():
     if all_processing_times:
         print(
             f"[Pure processing time] min={min(all_processing_times):.2f}s max={max(all_processing_times):.2f}s avg={np.mean(all_processing_times):.2f}s (n={len(all_processing_times)})"
+        )
+    if hit_processing_times:
+        print(
+            f"[Hit processing time] min={min(hit_processing_times):.2f}s max={max(hit_processing_times):.2f}s avg={np.mean(hit_processing_times):.2f}s (n={len(hit_processing_times)})"
+        )
+    if miss_processing_times:
+        print(
+            f"[Miss processing time] min={min(miss_processing_times):.2f}s max={max(miss_processing_times):.2f}s avg={np.mean(miss_processing_times):.2f}s (n={len(miss_processing_times)})"
+        )
+    if hit_generation_times:
+        print(
+            f"[Hit generation time] min={min(hit_generation_times):.2f}s max={max(hit_generation_times):.2f}s avg={np.mean(hit_generation_times):.2f}s (n={len(hit_generation_times)})"
+        )
+    if miss_generation_times:
+        print(
+            f"[Miss generation time] min={min(miss_generation_times):.2f}s max={max(miss_generation_times):.2f}s avg={np.mean(miss_generation_times):.2f}s (n={len(miss_generation_times)})"
+        )
+    if all_vector_search_ms:
+        print(
+            f"[Vector search time] min={min(all_vector_search_ms):.2f}ms max={max(all_vector_search_ms):.2f}ms avg={np.mean(all_vector_search_ms):.2f}ms (n={len(all_vector_search_ms)})"
+        )
+    if all_cache_retrieval_ms:
+        print(
+            f"[Cache retrieval time] min={min(all_cache_retrieval_ms):.2f}ms max={max(all_cache_retrieval_ms):.2f}ms avg={np.mean(all_cache_retrieval_ms):.2f}ms (n={len(all_cache_retrieval_ms)})"
         )
     hits = cache_stats.get("hits", 0)
     misses = cache_stats.get("misses", 0)
