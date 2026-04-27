@@ -167,3 +167,6 @@ cache_dir
 test_outputs
 datasets
 profile_outputs/
+
+*.mp4
+*.csv
