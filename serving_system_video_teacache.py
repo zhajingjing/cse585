@@ -401,6 +401,7 @@ def request_scheduler_video(
     eval_mode=False,
     no_nirvana=False,
     cache_stats=None,
+    warmup_requests=0,
 ):
     device = "cpu"
     processor = CLIPProcessor.from_pretrained(clip_model_id)
@@ -418,13 +419,16 @@ def request_scheduler_video(
     request_count_per_min = 0
     size_of_queues = 0
 
-    for _, row in selected_requests.iterrows():
-        if not eval_mode:
+    for row_idx, (_, row) in enumerate(selected_requests.iterrows()):
+        is_warmup = row_idx < warmup_requests
+        # Warmup requests bypass interval timing and are submitted immediately.
+        if not is_warmup and not eval_mode:
             while time.time() - start_time < row["seconds_from_start"]:
                 time.sleep(0.1)
 
         request_arrival_time = time.time()
         row["start_time"] = request_arrival_time
+        row["is_warmup"] = is_warmup
 
         # 1. ENCODING & VECTOR SEARCH TIME
         search_start = time.perf_counter()
@@ -809,16 +813,18 @@ def worker_video(
                 log_enabled,
                 f"[Worker {gpu_id}] request={request_id} completed "
                 f"queue_to_finish={finish_time:.2f}s processing={pure_processing_time:.2f}s "
-                f"generation={generation_total_elapsed:.2f}s",
+                f"generation={generation_total_elapsed:.2f}s"
+                + (" [warmup]" if request.get("is_warmup") else ""),
             )
-            latency_queue.put((
-                finish_time,
-                pure_processing_time,
-                cache_mode,
-                generation_total_elapsed,
-                float(request.get("vector_search_ms") or 0),
-                float(request.get("cache_retrieval_ms") or 0),
-            ))
+            if not request.get("is_warmup"):
+                latency_queue.put((
+                    finish_time,
+                    pure_processing_time,
+                    cache_mode,
+                    generation_total_elapsed,
+                    float(request.get("vector_search_ms") or 0),
+                    float(request.get("cache_retrieval_ms") or 0),
+                ))
         except queue.Empty:
             idle_counter += 1
             if idle_counter >= max_idle_iterations:
@@ -964,6 +970,14 @@ def main():
         help="Disable Nirvana cache: every request does full generation",
     )
     parser.add_argument(
+        "--warmup_requests",
+        type=int,
+        default=0,
+        help="Number of requests to run as cache prefill before timed measurement starts. "
+             "Warmup requests are submitted immediately (no interval delay), processed normally "
+             "to populate the cache, but excluded from latency/throughput statistics.",
+    )
+    parser.add_argument(
         "--log",
         action="store_true",
         help="Print per-request scheduler and worker progress logs",
@@ -1065,6 +1079,7 @@ def main():
             "eval_mode": args.eval_mode,
             "no_nirvana": args.no_nirvana,
             "cache_stats": cache_stats,
+            "warmup_requests": args.warmup_requests,
         },
     )
     scheduler.start()
@@ -1102,7 +1117,9 @@ def main():
         p.start()
         workers.append(p)
 
-    total_requests = len(prompts)
+    total_requests = len(prompts) - args.warmup_requests
+    if args.warmup_requests > 0:
+        print(f"[Warmup] {args.warmup_requests} prefill request(s) excluded from measurements", flush=True)
     all_latencies = []
     all_processing_times = []
     hit_processing_times = []
