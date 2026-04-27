@@ -38,7 +38,7 @@ REQUEST_INTERVAL_SECONDS="${REQUEST_INTERVAL_SECONDS:-30}"
 # seed it with the corresponding number of warmup requests so the cache is
 # meaningfully populated before the timed experiment begins.
 CACHE_SIZES=(  5  10  100)
-WARMUP_SIZES=( 3   5   10)
+WARMUP_SIZES=( 5  10   20)
 
 # Cache / serving policies:
 #   nirvana_teacache  – Nirvana latent cache + TeaCache block skipping
@@ -81,7 +81,7 @@ parse_summary_to_csv_row() {
   local cache_hits="" cache_total="" cache_pct=""
   local vsearch_avg=""
 
-  wall="$(grep '\[Total wall time\]' "$console_log" | grep -oE '[0-9]+\.[0-9]+s' | head -n1 | tr -d 's' || true)"
+  wall="$(grep '\[Total wall time\]' "$console_log" | sed -n 's/.*serving only: \([0-9.]*\)s.*/\1/p' || true)"
 
   local lat_line hit_line miss_line cache_line vsearch_line
   lat_line="$(grep     '\[Per-request latency\]'  "$console_log" | tail -n1 || true)"

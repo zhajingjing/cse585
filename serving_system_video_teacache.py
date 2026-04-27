@@ -402,6 +402,7 @@ def request_scheduler_video(
     no_nirvana=False,
     cache_stats=None,
     warmup_requests=0,
+    timed_start_value=None,
 ):
     device = "cpu"
     processor = CLIPProcessor.from_pretrained(clip_model_id)
@@ -419,7 +420,8 @@ def request_scheduler_video(
     request_count_per_min = 0
     size_of_queues = 0
 
-    WARMUP_DRAIN_SECONDS = 300  # wait for all warmup requests to finish before timed run
+    SECS_PER_WARMUP_REQUEST = 35  # conservative per-request budget (generation ~30s + overhead)
+    WARMUP_DRAIN_SECONDS = max(300, warmup_requests * SECS_PER_WARMUP_REQUEST)
 
     for row_idx, (_, row) in enumerate(selected_requests.iterrows()):
         is_warmup = row_idx < warmup_requests
@@ -433,6 +435,8 @@ def request_scheduler_video(
                 )
                 time.sleep(WARMUP_DRAIN_SECONDS)
                 start_time = time.time()  # reset clock so intervals are relative to post-warmup
+                if timed_start_value is not None:
+                    timed_start_value.value = start_time
             while time.time() - start_time < row["seconds_from_start"]:
                 time.sleep(0.1)
 
@@ -493,7 +497,8 @@ def request_scheduler_video(
                 f"[Scheduler] request={request_id} mode=miss reason=no_nirvana "
                 f"prompt='{summarize_prompt(prompt)}'",
             )
-            cache_stats["misses"] = cache_stats.get("misses", 0) + 1
+            if not is_warmup:
+                cache_stats["misses"] = cache_stats.get("misses", 0) + 1
             req_queue.put(row.to_dict())
             continue
 
@@ -509,7 +514,8 @@ def request_scheduler_video(
                 f"[Scheduler] request={request_id} mode=miss reason=empty_cache "
                 f"prompt='{summarize_prompt(prompt)}'",
             )
-            cache_stats["misses"] = cache_stats.get("misses", 0) + 1
+            if not is_warmup:
+                cache_stats["misses"] = cache_stats.get("misses", 0) + 1
             req_queue.put(row.to_dict())
         else:
             distances, indices = index.search(query_embedding, k=1)
@@ -567,7 +573,8 @@ def request_scheduler_video(
                         f"k={k_i} prompt='{summarize_prompt(prompt)}' "
                         f"nearest_prompt='{closest_prompt_summary}'",
                     )
-                    cache_stats["hits"] = cache_stats.get("hits", 0) + 1
+                    if not is_warmup:
+                        cache_stats["hits"] = cache_stats.get("hits", 0) + 1
                     req_queue.put(row.to_dict())
                     agg_k_distribution[k_i] += 1
                 else:
@@ -581,7 +588,8 @@ def request_scheduler_video(
                         f"sim={similarity:.3f} prompt='{summarize_prompt(prompt)}' "
                         f"nearest_prompt='{closest_prompt_summary}'",
                     )
-                    cache_stats["misses"] = cache_stats.get("misses", 0) + 1
+                    if not is_warmup:
+                        cache_stats["misses"] = cache_stats.get("misses", 0) + 1
                     req_queue.put(row.to_dict())
             else:
                 row["cached"] = None
@@ -594,7 +602,8 @@ def request_scheduler_video(
                     f"sim={similarity:.3f} prompt='{summarize_prompt(prompt)}' "
                     f"nearest_prompt='{closest_prompt_summary}'",
                 )
-                cache_stats["misses"] = cache_stats.get("misses", 0) + 1
+                if not is_warmup:
+                    cache_stats["misses"] = cache_stats.get("misses", 0) + 1
                 req_queue.put(row.to_dict())
 
         row["queue_entry_time"] = time.time()
@@ -1075,6 +1084,7 @@ def main():
     cache_stats["misses"] = 0
 
     wall_start = time.time()
+    timed_start_value = mp.Value("d", 0.0)
     scheduler = mp.Process(
         target=request_scheduler_video,
         args=(
@@ -1100,6 +1110,7 @@ def main():
             "no_nirvana": args.no_nirvana,
             "cache_stats": cache_stats,
             "warmup_requests": args.warmup_requests,
+            "timed_start_value": timed_start_value,
         },
     )
     scheduler.start()
@@ -1148,9 +1159,15 @@ def main():
     miss_generation_times = []
     all_vector_search_ms = []
     all_cache_retrieval_ms = []
+    serving_wall_start = None
+    serving_wall_end = None
     with tqdm(total=total_requests, desc="Requests", unit="req") as pbar:
         for _ in range(total_requests):
             finish_time, pure_processing_time, cache_mode, gen_s, vsearch_ms, retrieval_ms = latency_queue.get()
+            t_now = time.time()
+            if serving_wall_start is None:
+                serving_wall_start = t_now
+            serving_wall_end = t_now
             all_latencies.append(finish_time)
             all_processing_times.append(pure_processing_time)
             if cache_mode == "hit":
@@ -1179,7 +1196,9 @@ def main():
     scheduler.join()
 
     wall_total = time.time() - wall_start
-    print(f"[Total wall time] {wall_total:.2f}s")
+    t_timed_start = timed_start_value.value if timed_start_value.value > 0 else wall_start
+    serving_wall = serving_wall_end - t_timed_start if serving_wall_end else 0.0
+    print(f"[Total wall time] {wall_total:.2f}s  (serving only: {serving_wall:.2f}s)")
     if all_latencies:
         print(
             f"[Per-request latency] min={min(all_latencies):.2f}s max={max(all_latencies):.2f}s avg={np.mean(all_latencies):.2f}s (n={len(all_latencies)})"
