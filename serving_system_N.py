@@ -12,6 +12,7 @@ from PIL import Image
 import numpy as np
 import re
 import heapq
+from collections import OrderedDict
 from tqdm import tqdm
 import argparse
 import gc
@@ -192,6 +193,112 @@ class KMinHeapCache:
             self.update_score(index, k_i)
             return best_candidate  # Includes latent tensor
         return None
+
+
+class LRUCache:
+    """Evicts the least recently used prompt (by retrieve or insert time)."""
+
+    def __init__(self, max_size, initial_embeddings, latents, k_values=None):
+        self.max_size = max_size
+        self.k_values = k_values if k_values is not None else [5, 10, 15, 20, 25]
+        self.item_map = {}       # (index, k_i) -> (0, (index, k_i, latent))
+        self.index_map = {}      # index -> set of k_i
+        self.access_order = OrderedDict()  # index -> None, LRU at front
+        nk = len(self.k_values)
+        for index, _ in enumerate(initial_embeddings):
+            self.index_map[index] = set(self.k_values)
+            self.access_order[index] = None
+            for idx, k_i in enumerate(self.k_values):
+                entry = (0, (index, k_i, latents[index * nk + idx].share_memory_()))
+                self.item_map[(index, k_i)] = entry
+
+    def insert(self, index, f_i, k_i, latent):
+        if (index, k_i) not in self.item_map:
+            entry = (0, (index, k_i, latent.share_memory_()))
+            self.item_map[(index, k_i)] = entry
+        if index not in self.index_map:
+            self.index_map[index] = set(self.k_values)
+        self.access_order[index] = None
+        self.access_order.move_to_end(index)
+        if len(self.item_map) > self.max_size:
+            self.evict()
+
+    def update_score(self, index, k_i):
+        if index in self.access_order:
+            self.access_order.move_to_end(index)
+
+    def evict(self):
+        while self.access_order:
+            lru_index, _ = self.access_order.popitem(last=False)
+            if lru_index in self.index_map:
+                for k_i in list(self.index_map[lru_index]):
+                    self.item_map.pop((lru_index, k_i), None)
+                del self.index_map[lru_index]
+                return lru_index
+        return None
+
+    def retrieve(self, k_optimal, index_to_search):
+        candidates = [
+            (0, (index, k_i, latent))
+            for (index, k_i), (_, (_, _, latent)) in self.item_map.items()
+            if index == index_to_search and k_i <= k_optimal
+        ]
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda x: x[1][1])
+        self.update_score(index_to_search, best[1][1])
+        return best
+
+
+class FIFOCache:
+    """Evicts the oldest inserted prompt regardless of access pattern."""
+
+    def __init__(self, max_size, initial_embeddings, latents, k_values=None):
+        self.max_size = max_size
+        self.k_values = k_values if k_values is not None else [5, 10, 15, 20, 25]
+        self.item_map = {}
+        self.index_map = {}
+        self.insert_order = OrderedDict()  # index -> None, oldest at front
+        nk = len(self.k_values)
+        for index, _ in enumerate(initial_embeddings):
+            self.index_map[index] = set(self.k_values)
+            self.insert_order[index] = None
+            for idx, k_i in enumerate(self.k_values):
+                entry = (0, (index, k_i, latents[index * nk + idx].share_memory_()))
+                self.item_map[(index, k_i)] = entry
+
+    def insert(self, index, f_i, k_i, latent):
+        if (index, k_i) not in self.item_map:
+            entry = (0, (index, k_i, latent.share_memory_()))
+            self.item_map[(index, k_i)] = entry
+        if index not in self.index_map:
+            self.index_map[index] = set(self.k_values)
+            self.insert_order[index] = None  # only record first insertion
+        if len(self.item_map) > self.max_size:
+            self.evict()
+
+    def update_score(self, index, k_i):
+        pass  # FIFO ignores access pattern
+
+    def evict(self):
+        while self.insert_order:
+            oldest_index, _ = self.insert_order.popitem(last=False)
+            if oldest_index in self.index_map:
+                for k_i in list(self.index_map[oldest_index]):
+                    self.item_map.pop((oldest_index, k_i), None)
+                del self.index_map[oldest_index]
+                return oldest_index
+        return None
+
+    def retrieve(self, k_optimal, index_to_search):
+        candidates = [
+            (0, (index, k_i, latent))
+            for (index, k_i), (_, (_, _, latent)) in self.item_map.items()
+            if index == index_to_search and k_i <= k_optimal
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda x: x[1][1])
 
 
 # Function to load the Stable Diffusion 3.5 model

@@ -37,7 +37,7 @@ from tqdm import tqdm
 from transformers import CLIPModel, CLIPProcessor
 
 from eval.teacache.experiments.utils import read_prompt_list
-from serving_system_N import KMinHeapCache
+from serving_system_N import FIFOCache, KMinHeapCache, LRUCache
 
 WAN_ROOT = os.path.join(os.path.dirname(__file__), "Wan2.1")
 if WAN_ROOT not in sys.path:
@@ -411,6 +411,8 @@ def request_scheduler_video(
 
     if cache_stats is None:
         cache_stats = {"hits": 0, "misses": 0}
+    eviction_times_ms = []
+    eviction_log = []  # list of (cache_id, prompt) for each eviction
 
     minute = 0
     os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
@@ -455,8 +457,13 @@ def request_scheduler_video(
             new_cache_id = cache_data["cache_id"]
 
             while len(cache.item_map) + len(cache.k_values) > cache.max_size:
+                t_evict_start = time.perf_counter()
                 evicted_cache_id = cache.evict()
+                eviction_times_ms.append((time.perf_counter() - t_evict_start) * 1000)
                 if evicted_cache_id is not None:
+                    evicted_prompt = cached_requests.get(evicted_cache_id, "unknown")
+                    eviction_log.append((evicted_cache_id, evicted_prompt))
+                    log_message(log_enabled, f"[Cache evict] id={evicted_cache_id} prompt='{summarize_prompt(evicted_prompt)}'")
                     cached_requests.pop(evicted_cache_id, None)
                     index, final_text_embeddings, faiss_cache_ids = remove_cache_entry_from_faiss(
                         evicted_cache_id,
@@ -637,6 +644,9 @@ def request_scheduler_video(
         if all_done:
             break
         time.sleep(1)
+
+    cache_stats["eviction_times_ms"] = eviction_times_ms
+    cache_stats["eviction_log"] = eviction_log
 
 
 def worker_video(
@@ -989,6 +999,12 @@ def main():
         help="Disable Nirvana cache: every request does full generation",
     )
     parser.add_argument(
+        "--eviction_policy",
+        choices=["lcbfu", "lru", "fifo"],
+        default="lcbfu",
+        help="Cache eviction policy: lcbfu (default), lru, or fifo",
+    )
+    parser.add_argument(
         "--warmup_requests",
         type=int,
         default=0,
@@ -1067,7 +1083,8 @@ def main():
     final_text_embeddings = np.zeros((0, embedding_dim), dtype=np.float32)
     cached_requests = {}
     faiss_cache_ids = []
-    cache = KMinHeapCache(
+    _cache_cls = {"lcbfu": KMinHeapCache, "lru": LRUCache, "fifo": FIFOCache}[args.eviction_policy]
+    cache = _cache_cls(
         max_size=args.cache_size * len(K_VALUES_VIDEO),
         initial_embeddings=final_text_embeddings,
         latents=torch.empty(0),
@@ -1231,6 +1248,16 @@ def main():
         print(
             f"[Cache retrieval time] min={min(all_cache_retrieval_ms):.2f}ms max={max(all_cache_retrieval_ms):.2f}ms avg={np.mean(all_cache_retrieval_ms):.2f}ms (n={len(all_cache_retrieval_ms)})"
         )
+    eviction_times = cache_stats.get("eviction_times_ms", [])
+    eviction_log = cache_stats.get("eviction_log", [])
+    if eviction_times:
+        print(
+            f"[Eviction time] count={len(eviction_times)} min={min(eviction_times):.3f}ms max={max(eviction_times):.3f}ms avg={np.mean(eviction_times):.3f}ms"
+        )
+    if eviction_log:
+        print(f"[Evicted prompts] ({len(eviction_log)} total):")
+        for eid, eprompt in eviction_log:
+            print(f"  id={eid}  '{eprompt}'")
     hits = cache_stats.get("hits", 0)
     misses = cache_stats.get("misses", 0)
     total_cache_requests = hits + misses

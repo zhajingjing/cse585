@@ -37,17 +37,17 @@ REQUEST_INTERVAL_SECONDS="${REQUEST_INTERVAL_SECONDS:-30}"
 # WARMUP_SIZES is paired 1-to-1 with CACHE_SIZES: for a cache of size N,
 # seed it with the corresponding number of warmup requests so the cache is
 # meaningfully populated before the timed experiment begins.
-CACHE_SIZES=(  5  10  100)
-WARMUP_SIZES=( 5  10   20)
+CACHE_SIZES=(  10)
+WARMUP_SIZES=( 10)
 
 # Cache / serving policies:
 #   nirvana_teacache  – Nirvana latent cache + TeaCache block skipping
 #   teacache_only     – TeaCache only, no Nirvana latent cache
 #   none              – plain Wan, no caching at all (baseline)
 METHODS=(
-  "nirvana_teacache:"
-  # "teacache_only:--no_nirvana"
-  # "none:--no_nirvana --no_teacache"
+  "lcbfu:"
+  "lru:--eviction_policy lru"
+  "fifo:--eviction_policy fifo"
 )
 
 # ── Workloads ────────────────────────────────────────────────────────────────
