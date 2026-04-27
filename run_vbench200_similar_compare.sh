@@ -71,30 +71,46 @@ append_summary_row() {
   local retrieval_min="" retrieval_max="" retrieval_avg="" retrieval_n=""
   local cache_hits="" cache_total="" cache_pct=""
 
-  parse_s_line() {
-    local line="$1" pfx="$2"
-    eval "${pfx}_min=\"\$(echo \"\$line\" | sed -n 's/.*min=\([0-9.]*\)s.*/\1/p')\""
-    eval "${pfx}_max=\"\$(echo \"\$line\" | sed -n 's/.*max=\([0-9.]*\)s.*/\1/p')\""
-    eval "${pfx}_avg=\"\$(echo \"\$line\" | sed -n 's/.*avg=\([0-9.]*\)s.*/\1/p')\""
-    eval "${pfx}_n=\"\$(echo \"\$line\" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')\""
+  _parse_stats_s() {
+    local line="$1"
+    echo "$(echo "$line" | sed -n 's/.*min=\([0-9.]*\)s.*/\1/p')" \
+         "$(echo "$line" | sed -n 's/.*max=\([0-9.]*\)s.*/\1/p')" \
+         "$(echo "$line" | sed -n 's/.*avg=\([0-9.]*\)s.*/\1/p')" \
+         "$(echo "$line" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')"
   }
 
-  parse_ms_line() {
-    local line="$1" pfx="$2"
-    eval "${pfx}_min=\"\$(echo \"\$line\" | sed -n 's/.*min=\([0-9.]*\)ms.*/\1/p')\""
-    eval "${pfx}_max=\"\$(echo \"\$line\" | sed -n 's/.*max=\([0-9.]*\)ms.*/\1/p')\""
-    eval "${pfx}_avg=\"\$(echo \"\$line\" | sed -n 's/.*avg=\([0-9.]*\)ms.*/\1/p')\""
-    eval "${pfx}_n=\"\$(echo \"\$line\" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')\""
+  _parse_stats_ms() {
+    local line="$1"
+    echo "$(echo "$line" | sed -n 's/.*min=\([0-9.]*\)ms.*/\1/p')" \
+         "$(echo "$line" | sed -n 's/.*max=\([0-9.]*\)ms.*/\1/p')" \
+         "$(echo "$line" | sed -n 's/.*avg=\([0-9.]*\)ms.*/\1/p')" \
+         "$(echo "$line" | sed -n 's/.*(n=\([0-9]*\)).*/\1/p')"
   }
 
-  [[ -n "$latency_line" ]]   && parse_s_line  "$latency_line"   lat
-  [[ -n "$proc_line" ]]      && parse_s_line  "$proc_line"      proc
-  [[ -n "$hit_proc_line" ]]  && parse_s_line  "$hit_proc_line"  hit_proc
-  [[ -n "$miss_proc_line" ]] && parse_s_line  "$miss_proc_line" miss_proc
-  [[ -n "$hit_gen_line" ]]   && parse_s_line  "$hit_gen_line"   hit_gen
-  [[ -n "$miss_gen_line" ]]  && parse_s_line  "$miss_gen_line"  miss_gen
-  [[ -n "$vsearch_line" ]]   && parse_ms_line "$vsearch_line"   vsearch
-  [[ -n "$retrieval_line" ]] && parse_ms_line "$retrieval_line" retrieval
+  if [[ -n "$latency_line" ]]; then
+    read -r lat_min lat_max lat_avg lat_n <<< "$(_parse_stats_s "$latency_line")"
+  fi
+  if [[ -n "$proc_line" ]]; then
+    read -r proc_min proc_max proc_avg proc_n <<< "$(_parse_stats_s "$proc_line")"
+  fi
+  if [[ -n "$hit_proc_line" ]]; then
+    read -r hit_proc_min hit_proc_max hit_proc_avg hit_proc_n <<< "$(_parse_stats_s "$hit_proc_line")"
+  fi
+  if [[ -n "$miss_proc_line" ]]; then
+    read -r miss_proc_min miss_proc_max miss_proc_avg miss_proc_n <<< "$(_parse_stats_s "$miss_proc_line")"
+  fi
+  if [[ -n "$hit_gen_line" ]]; then
+    read -r hit_gen_min hit_gen_max hit_gen_avg hit_gen_n <<< "$(_parse_stats_s "$hit_gen_line")"
+  fi
+  if [[ -n "$miss_gen_line" ]]; then
+    read -r miss_gen_min miss_gen_max miss_gen_avg miss_gen_n <<< "$(_parse_stats_s "$miss_gen_line")"
+  fi
+  if [[ -n "$vsearch_line" ]]; then
+    read -r vsearch_min vsearch_max vsearch_avg vsearch_n <<< "$(_parse_stats_ms "$vsearch_line")"
+  fi
+  if [[ -n "$retrieval_line" ]]; then
+    read -r retrieval_min retrieval_max retrieval_avg retrieval_n <<< "$(_parse_stats_ms "$retrieval_line")"
+  fi
 
   if [[ "$cache_line" == *"N/A"* ]]; then
     cache_hits="0"; cache_total="0"; cache_pct="0"

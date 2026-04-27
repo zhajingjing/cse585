@@ -1128,6 +1128,15 @@ def main():
                 all_cache_retrieval_ms.append(retrieval_ms)
             pbar.update(1)
 
+    # Drain new_cache_queue so worker processes can exit cleanly.
+    # Workers put latents here after each miss; once the scheduler exits its
+    # consumer loop the pipe buffer fills and workers block on join() forever.
+    while True:
+        try:
+            new_cache_queue.get_nowait()
+        except Exception:
+            break
+
     for p in workers:
         p.join()
     scheduler.join()
