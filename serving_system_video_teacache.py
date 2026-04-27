@@ -419,10 +419,20 @@ def request_scheduler_video(
     request_count_per_min = 0
     size_of_queues = 0
 
+    WARMUP_DRAIN_SECONDS = 300  # wait for all warmup requests to finish before timed run
+
     for row_idx, (_, row) in enumerate(selected_requests.iterrows()):
         is_warmup = row_idx < warmup_requests
-        # Warmup requests bypass interval timing and are submitted immediately.
         if not is_warmup and not eval_mode:
+            # First timed request: wait for warmup to drain, then apply interval schedule.
+            if row_idx == warmup_requests and warmup_requests > 0:
+                print(
+                    f"[Warmup] All warmup requests submitted. "
+                    f"Sleeping {WARMUP_DRAIN_SECONDS}s for workers to finish...",
+                    flush=True,
+                )
+                time.sleep(WARMUP_DRAIN_SECONDS)
+                start_time = time.time()  # reset clock so intervals are relative to post-warmup
             while time.time() - start_time < row["seconds_from_start"]:
                 time.sleep(0.1)
 
