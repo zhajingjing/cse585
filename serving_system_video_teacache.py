@@ -1017,6 +1017,11 @@ def main():
         ] * max(1, (num_req + 2) // 3)
         prompts = prompts[:num_req]
 
+    # Randomly sample warmup prompts from the full pool (duplicates with timed
+    # requests are fine — warmup just seeds the cache before measurements begin).
+    warmup_prompts = random.sample(prompts, min(args.warmup_requests, len(prompts))) \
+        if args.warmup_requests > 0 else []
+
     if args.request_interval_seconds is not None:
         seconds_from_start = generate_fixed_interval_seconds_from_start(
             len(prompts), args.request_interval_seconds
@@ -1025,13 +1030,18 @@ def main():
         seconds_from_start = generate_rapidly_increasing_seconds_from_start(
             len(prompts), min_rate=0.5, max_rate=4
         )
-    selected_requests = pd.DataFrame(
-        {
-            "request_id": list(range(len(prompts))),
-            "prompt": prompts,
-            "seconds_from_start": seconds_from_start,
-        }
-    )
+
+    # Warmup rows prepended with seconds_from_start=0; timed rows follow.
+    warmup_rows = [
+        {"request_id": i, "prompt": p, "seconds_from_start": 0.0}
+        for i, p in enumerate(warmup_prompts)
+    ]
+    timed_rows = [
+        {"request_id": len(warmup_prompts) + i, "prompt": p, "seconds_from_start": s}
+        for i, (p, s) in enumerate(zip(prompts, seconds_from_start))
+    ]
+    selected_requests = pd.DataFrame(warmup_rows + timed_rows)
+    prompts = warmup_prompts + prompts
 
     embedding_dim = 768
     index = faiss.IndexFlatL2(embedding_dim)

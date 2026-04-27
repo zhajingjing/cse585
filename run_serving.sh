@@ -37,8 +37,8 @@ REQUEST_INTERVAL_SECONDS="${REQUEST_INTERVAL_SECONDS:-30}"
 # WARMUP_SIZES is paired 1-to-1 with CACHE_SIZES: for a cache of size N,
 # seed it with the corresponding number of warmup requests so the cache is
 # meaningfully populated before the timed experiment begins.
-CACHE_SIZES=(  1   5  10  100)
-WARMUP_SIZES=( 1   3   5   10)
+CACHE_SIZES=(  5  10  100)
+WARMUP_SIZES=( 3   5   10)
 
 # Cache / serving policies:
 #   nirvana_teacache  – Nirvana latent cache + TeaCache block skipping
@@ -69,6 +69,7 @@ latency_min_s,latency_max_s,latency_avg_s,latency_n,\
 hit_processing_avg_s,hit_processing_n,\
 miss_processing_avg_s,miss_processing_n,\
 cache_hits,cache_total,cache_hit_rate_pct,\
+vector_search_avg_ms,\
 run_dir,console_log" > "$SUMMARY_CSV"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -78,14 +79,16 @@ parse_summary_to_csv_row() {
   local wall="" lat_min="" lat_max="" lat_avg="" lat_n=""
   local hit_avg="" hit_n="" miss_avg="" miss_n=""
   local cache_hits="" cache_total="" cache_pct=""
+  local vsearch_avg=""
 
   wall="$(grep '\[Total wall time\]' "$console_log" | grep -oE '[0-9]+\.[0-9]+s' | head -n1 | tr -d 's' || true)"
 
-  local lat_line hit_line miss_line cache_line
-  lat_line="$(grep  '\[Per-request latency\]'  "$console_log" | tail -n1 || true)"
-  hit_line="$(grep  '\[Hit processing time\]'  "$console_log" | tail -n1 || true)"
-  miss_line="$(grep '\[Miss processing time\]' "$console_log" | tail -n1 || true)"
-  cache_line="$(grep '\[Cache hit rate\]'       "$console_log" | tail -n1 || true)"
+  local lat_line hit_line miss_line cache_line vsearch_line
+  lat_line="$(grep     '\[Per-request latency\]'  "$console_log" | tail -n1 || true)"
+  hit_line="$(grep     '\[Hit processing time\]'  "$console_log" | tail -n1 || true)"
+  miss_line="$(grep    '\[Miss processing time\]' "$console_log" | tail -n1 || true)"
+  cache_line="$(grep   '\[Cache hit rate\]'        "$console_log" | tail -n1 || true)"
+  vsearch_line="$(grep '\[Vector search time\]'   "$console_log" | tail -n1 || true)"
 
   [[ -n "$lat_line" ]] && {
     lat_min="$(echo "$lat_line"  | sed -n 's/.*min=\([0-9.]*\)s.*/\1/p')"
@@ -108,6 +111,8 @@ parse_summary_to_csv_row() {
     cache_total="$(echo "$cache_line" | sed -n 's/.*] \([0-9]*\)\/\([0-9]*\) = \([0-9.]*\)%.*/\2/p')"
     cache_pct="$(echo   "$cache_line" | sed -n 's/.*] \([0-9]*\)\/\([0-9]*\) = \([0-9.]*\)%.*/\3/p')"
   fi
+  [[ -n "$vsearch_line" ]] && \
+    vsearch_avg="$(echo "$vsearch_line" | sed -n 's/.*avg=\([0-9.]*\)ms.*/\1/p')"
 
   echo "$workload,$method,$cache_size,\
 $wall,\
@@ -115,6 +120,7 @@ $lat_min,$lat_max,$lat_avg,$lat_n,\
 $hit_avg,$hit_n,\
 $miss_avg,$miss_n,\
 $cache_hits,$cache_total,$cache_pct,\
+$vsearch_avg,\
 $run_dir,$console_log" >> "$SUMMARY_CSV"
 }
 
