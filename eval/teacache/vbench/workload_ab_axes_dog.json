@@ -1,0 +1,10 @@
+[
+  {"axis": "base",        "prompt_en": "A fluffy golden retriever wearing a red collar walks slowly on a sandy beach at sunset"},
+  {"axis": "subject",     "prompt_en": "A fluffy black labrador wearing a red collar walks slowly on a sandy beach at sunset"},
+  {"axis": "setting",     "prompt_en": "A fluffy golden retriever wearing a red collar walks slowly through a snowy pine forest at sunset"},
+  {"axis": "color",       "prompt_en": "A fluffy golden retriever wearing a bright blue collar walks slowly on a sandy beach at sunset"},
+  {"axis": "motion",      "prompt_en": "A fluffy golden retriever wearing a red collar runs fast across a sandy beach at sunset"},
+  {"axis": "texture",     "prompt_en": "A short-haired golden retriever wearing a red collar walks slowly on a sandy beach at sunset"},
+  {"axis": "style",       "prompt_en": "A watercolor painting of a golden retriever wearing a red collar walking slowly on a sandy beach at sunset"},
+  {"axis": "time_of_day", "prompt_en": "A fluffy golden retriever wearing a red collar walks slowly on a sandy beach under bright midday sun"}
+]

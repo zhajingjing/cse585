@@ -1,0 +1,10 @@
+[
+  {"axis": "base",        "prompt_en": "A young woman in a flowing white dress dances gracefully in a sunlit grassy meadow"},
+  {"axis": "subject",     "prompt_en": "A young man in flowing white clothes dances gracefully in a sunlit grassy meadow"},
+  {"axis": "setting",     "prompt_en": "A young woman in a flowing white dress dances gracefully on a sunlit rooftop in a city"},
+  {"axis": "color",       "prompt_en": "A young woman in a flowing crimson red dress dances gracefully in a sunlit grassy meadow"},
+  {"axis": "motion",      "prompt_en": "A young woman in a flowing white dress stands still with eyes closed in a sunlit grassy meadow"},
+  {"axis": "texture",     "prompt_en": "A young woman in a sequined glittering dress dances gracefully in a sunlit grassy meadow"},
+  {"axis": "style",       "prompt_en": "A pencil sketch of a young woman in a flowing white dress dancing gracefully in a sunlit grassy meadow"},
+  {"axis": "time_of_day", "prompt_en": "A young woman in a flowing white dress dances gracefully in a grassy meadow under the moonlight at midnight"}
+]

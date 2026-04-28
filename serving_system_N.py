@@ -3,8 +3,8 @@ import time
 import queue
 import torch.multiprocessing as mp
 import pandas as pd
-from diffusers import StableDiffusion3Pipeline, StableDiffusionXLImg2ImgPipeline, DiffusionPipeline, SanaPipeline, StableDiffusionXLPipeline
-from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler, FlowMatchEulerDiscreteScheduler
+# from diffusers import StableDiffusion3Pipeline, StableDiffusionXLImg2ImgPipeline, DiffusionPipeline, SanaPipeline, StableDiffusionXLPipeline
+# from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler, FlowMatchEulerDiscreteScheduler
 import faiss
 import os
 from transformers import CLIPModel, CLIPProcessor
@@ -12,37 +12,24 @@ from PIL import Image
 import numpy as np
 import re
 import heapq
+from collections import OrderedDict
 from tqdm import tqdm
 import argparse
 import gc
-import json
+
 # Cache Data Structure
-
-parser = argparse.ArgumentParser(description="model selection")
-parser.add_argument("--large_model", type=str, default='sd3.5',required=False, help="which large model you wanna use")
-parser.add_argument("--num_req", type=int, default=10000, required=True, help="number of requests")
-parser.add_argument("--cache_size", type=int, default=20000, help="cache size")
-parser.add_argument("--cache_directory", type=str, required=False, help="directory of cached images")
-parser.add_argument("--image_directory", type=str, required=False, help="directory of generated images")
-parser.add_argument("--dataset", type=str, default='diffusiondb', required=False, help="dataset")
-
-args = parser.parse_args()
-
-directory = args.image_directory
-os.makedirs(directory, exist_ok=True)
-print(f"Directory '{directory}' created successfully.")
-
-def calculate_shift(
-    image_seq_len,
-    base_seq_len: int = 256,
-    max_seq_len: int = 4096,
-    base_shift: float = 0.5,
-    max_shift: float = 1.16,
-):
-    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-    b = base_shift - m * base_seq_len
-    mu = image_seq_len * m + b
-    return mu
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="model selection")
+    parser.add_argument("--large_model", type=str, default='sd3.5',required=False, help="which large model you wanna use")
+    parser.add_argument("--small_model", type=str,default='sdxl', required=False, help="which small model you wanna use")
+    parser.add_argument("--num_req", type=int, default=1000, required=True, help="number of requests")
+    parser.add_argument("--cache_size", type=int, default=10000, help="cache size")
+    parser.add_argument("--cache_directory", type=str, required=False, help="directory of cached images")
+    parser.add_argument("--image_directory", type=str, required=False, help="directory of generated images")
+    args = parser.parse_args()
+    directory = args.image_directory
+    os.makedirs(directory, exist_ok=True)
+    print(f"Directory '{directory}' created successfully.")
 
 def extract_prompt(filename):
     """Extract prompt from filename by replacing underscores with spaces."""
@@ -124,42 +111,23 @@ def precompute_timesteps_for_labels_35(scheduler, labels, device, index):
 
     return timesteps
 
-
-def precompute_timesteps_for_labels_flux(scheduler, labels, device, index,mu,sigmas):
-    timesteps = []
-    for label in labels:
-        if label == 0:
-            # For label 0, use full 50 iterations
-            scheduler.set_timesteps(num_inference_steps=50, device=device,mu=mu, sigmas=sigmas)
-            timesteps.append(scheduler.timesteps)
-        elif label == 1:
-            # For label 1, use last 40 iterations
-            
-            scheduler.set_timesteps(num_inference_steps=50, device=device, mu=mu, sigmas=sigmas)
-            timesteps.append(scheduler.timesteps[index:])         
-        else:
-            timesteps.append([])  
-
-    return timesteps
-
 class KMinHeapCache:
-    def __init__(self, max_size, initial_embeddings, latents):
+    def __init__(self, max_size, initial_embeddings, latents, k_values=None):
         self.heap = []  # Min-heap for (LCBFU score, (index, k_i))
         self.item_map = {}  # Maps (index, k_i) to (score, index, k_i, latent) for fast lookups
         self.index_map = {}  # Maps index to a set of remaining k_i values for eviction check
         self.max_size = max_size
-        
-        # Define the k_i values in order
-        k_values = [5, 10, 15, 20, 25]
+        self.k_values = k_values if k_values is not None else [5, 10, 15, 20, 25]
+        nk = len(self.k_values)
 
         # Initialize cache with existing embeddings
         for index, _ in enumerate(initial_embeddings):
-            self.index_map[index] = set(k_values)  # All k_i values are initially present for each index
+            self.index_map[index] = set(self.k_values)  # All k_i values are initially present for each index
             
             f_i = 0  # Default initial frequency
-            for idx, k_i in enumerate(k_values):
+            for idx, k_i in enumerate(self.k_values):
                 score = self.compute_lcbfu_score(f_i, k_i)
-                entry = (score, (index, k_i, latents[index * 5 + idx].share_memory_()))  # Store both index, k_i, and latent tensor
+                entry = (score, (index, k_i, latents[index * nk + idx].share_memory_()))  # Store both index, k_i, and latent tensor
                 heapq.heappush(self.heap, entry)
                 self.item_map[(index, k_i)] = entry  # Use tuple key (index, k_i)
 
@@ -167,7 +135,6 @@ class KMinHeapCache:
         return f_i * k_i
 
     def insert(self, index, f_i, k_i, latent):
-        k_values = [5, 10, 15, 20, 25]
         score = self.compute_lcbfu_score(f_i, k_i)
 
         if (index, k_i) in self.item_map:
@@ -178,7 +145,7 @@ class KMinHeapCache:
             self.item_map[(index, k_i)] = entry
 
         if index not in self.index_map:
-            self.index_map[index] = set(k_values)
+            self.index_map[index] = set(self.k_values)
 
         if len(self.item_map) > self.max_size:
             self.evict()
@@ -208,7 +175,7 @@ class KMinHeapCache:
                 if not self.index_map[index]:
                     del self.index_map[index]
                     evicted_index = index
-                    # print(evicted_index)
+                    print(evicted_index)
                     break  # Stop eviction after removing one index
 
         return evicted_index
@@ -228,52 +195,152 @@ class KMinHeapCache:
         return None
 
 
+class LRUCache:
+    """Evicts the least recently used prompt (by retrieve or insert time)."""
+
+    def __init__(self, max_size, initial_embeddings, latents, k_values=None):
+        self.max_size = max_size
+        self.k_values = k_values if k_values is not None else [5, 10, 15, 20, 25]
+        self.item_map = {}       # (index, k_i) -> (0, (index, k_i, latent))
+        self.index_map = {}      # index -> set of k_i
+        self.access_order = OrderedDict()  # index -> None, LRU at front
+        nk = len(self.k_values)
+        for index, _ in enumerate(initial_embeddings):
+            self.index_map[index] = set(self.k_values)
+            self.access_order[index] = None
+            for idx, k_i in enumerate(self.k_values):
+                entry = (0, (index, k_i, latents[index * nk + idx].share_memory_()))
+                self.item_map[(index, k_i)] = entry
+
+    def insert(self, index, f_i, k_i, latent):
+        if (index, k_i) not in self.item_map:
+            entry = (0, (index, k_i, latent.share_memory_()))
+            self.item_map[(index, k_i)] = entry
+        if index not in self.index_map:
+            self.index_map[index] = set(self.k_values)
+        self.access_order[index] = None
+        self.access_order.move_to_end(index)
+        if len(self.item_map) > self.max_size:
+            self.evict()
+
+    def update_score(self, index, k_i):
+        if index in self.access_order:
+            self.access_order.move_to_end(index)
+
+    def evict(self):
+        while self.access_order:
+            lru_index, _ = self.access_order.popitem(last=False)
+            if lru_index in self.index_map:
+                for k_i in list(self.index_map[lru_index]):
+                    self.item_map.pop((lru_index, k_i), None)
+                del self.index_map[lru_index]
+                return lru_index
+        return None
+
+    def retrieve(self, k_optimal, index_to_search):
+        candidates = [
+            (0, (index, k_i, latent))
+            for (index, k_i), (_, (_, _, latent)) in self.item_map.items()
+            if index == index_to_search and k_i <= k_optimal
+        ]
+        if not candidates:
+            return None
+        best = max(candidates, key=lambda x: x[1][1])
+        self.update_score(index_to_search, best[1][1])
+        return best
+
+
+class FIFOCache:
+    """Evicts the oldest inserted prompt regardless of access pattern."""
+
+    def __init__(self, max_size, initial_embeddings, latents, k_values=None):
+        self.max_size = max_size
+        self.k_values = k_values if k_values is not None else [5, 10, 15, 20, 25]
+        self.item_map = {}
+        self.index_map = {}
+        self.insert_order = OrderedDict()  # index -> None, oldest at front
+        nk = len(self.k_values)
+        for index, _ in enumerate(initial_embeddings):
+            self.index_map[index] = set(self.k_values)
+            self.insert_order[index] = None
+            for idx, k_i in enumerate(self.k_values):
+                entry = (0, (index, k_i, latents[index * nk + idx].share_memory_()))
+                self.item_map[(index, k_i)] = entry
+
+    def insert(self, index, f_i, k_i, latent):
+        if (index, k_i) not in self.item_map:
+            entry = (0, (index, k_i, latent.share_memory_()))
+            self.item_map[(index, k_i)] = entry
+        if index not in self.index_map:
+            self.index_map[index] = set(self.k_values)
+            self.insert_order[index] = None  # only record first insertion
+        if len(self.item_map) > self.max_size:
+            self.evict()
+
+    def update_score(self, index, k_i):
+        pass  # FIFO ignores access pattern
+
+    def evict(self):
+        while self.insert_order:
+            oldest_index, _ = self.insert_order.popitem(last=False)
+            if oldest_index in self.index_map:
+                for k_i in list(self.index_map[oldest_index]):
+                    self.item_map.pop((oldest_index, k_i), None)
+                del self.index_map[oldest_index]
+                return oldest_index
+        return None
+
+    def retrieve(self, k_optimal, index_to_search):
+        candidates = [
+            (0, (index, k_i, latent))
+            for (index, k_i), (_, (_, _, latent)) in self.item_map.items()
+            if index == index_to_search and k_i <= k_optimal
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda x: x[1][1])
+
+
 # Function to load the Stable Diffusion 3.5 model
-def load_model(model_type, device):
-    if model_type == "sd3.5":
-        return StableDiffusion3Pipeline.from_pretrained(
-            "stabilityai/stable-diffusion-3.5-large", torch_dtype=torch.bfloat16
-        ).to(device)
-    elif model_type == "flux":
-        return DiffusionPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16).to(device)
+def load_model(device):
+    return StableDiffusion3Pipeline.from_pretrained(
+        "stabilityai/stable-diffusion-3.5-large", torch_dtype=torch.bfloat16
+    ).to(device)
 
 # Request scheduler
-def request_scheduler(req_queue,  selected_requests, start_time,num_cached,prompt_to_index, index, cache, new_cache_queue, cached_requests, final_text_embeddings, k_values, processor, clip_model,  worker_status, num_gpus, time_gap, log_file="request_throughput_3000_N.csv"):
+def request_scheduler(req_queue,  selected_requests, start_time, index, cache, new_cache_queue, cached_requests, final_text_embeddings, k_values, processor, clip_model,  worker_status, log_file="request_throughput_climbing_N.csv"):
     device = clip_model.device
     agg_k_distribution = {5: 0, 10: 0, 15: 0, 20: 0, 25: 0} 
     minute = 0
-    # with open(log_file, "w") as f:
-    #     f.write("timestamp,request_rate,throughput\n")
+    with open(log_file, "w") as f:
+        f.write("timestamp,request_rate,throughput\n")
     last_check_time = time.time()
     last_check_time_queue = last_check_time
     request_count_per_min = 0
     size_of_queues = 0
     throughput = 0        
-    cache_count = num_cached
     for _, row in selected_requests.iterrows():
         while time.time() - start_time < row['seconds_from_start']:
             time.sleep(0.1)
             
             
-          # Start time of request processing
+        request_arrival_time = time.time()  # Start time of request processing
 
-        row['start_time'] = start_time  # Add start_time to request
+        row['start_time'] = request_arrival_time  # Add start_time to request
         
         while not new_cache_queue.empty():
             cache_data = new_cache_queue.get()  # Retrieves the dictionary from the queue
-            # print("new cached data:", cache_data)
             new_cached_latents = cache_data['cached_latents']
             new_cached_prompt = cache_data['prompt']
             new_query_embedding = cache_data['query_embedding']
-            cache_count += 1
-            while len(cache.item_map) + 5  > cache.max_size:
+            while len(cache.item_map) + len(cache.k_values) > cache.max_size:
                 evicted_index = cache.evict()
                 if evicted_index is not None:
                     del cached_requests[evicted_index]
                     index , final_text_embeddings = evict_from_faiss(index, final_text_embeddings, evicted_index)
 
             
-            # num_embeddings = index.ntotal
+            num_embeddings = index.ntotal
             cached_requests.append(new_cached_prompt) 
             index.add(new_query_embedding)
 
@@ -281,8 +348,7 @@ def request_scheduler(req_queue,  selected_requests, start_time,num_cached,promp
             final_text_embeddings = np.concatenate((final_text_embeddings, new_query_embedding), axis=0)
             
             for idx, k in enumerate(k_values):
-                cache.insert(cache_count - 1 , 0, k, new_cached_latents[idx])
-            prompt_to_index[new_cached_prompt] = cache_count - 1
+                cache.insert(num_embeddings , 0, k, new_cached_latents[idx])
 
         prompt = row['prompt']
 
@@ -307,8 +373,6 @@ def request_scheduler(req_queue,  selected_requests, start_time,num_cached,promp
         text_embedding = text_embedding.cpu()
         if text_similarity_scores > 0.65:
         # print("hit")
-            print("new prompt:", prompt)
-            print("retrieved prompt:", closest_prompt)
             if text_similarity_scores > 0.95:
                 k = 4
                 closest_index = 25
@@ -324,8 +388,7 @@ def request_scheduler(req_queue,  selected_requests, start_time,num_cached,promp
             elif text_similarity_scores > 0.65:
                 k = 0
                 closest_index = 5
-            cache_idx = prompt_to_index.get(closest_prompt)
-            best_candidate = cache.retrieve(closest_index, cache_idx)
+            best_candidate = cache.retrieve(closest_index, indices[0][0])
             
             if best_candidate:
                 score, (idex, k_i, latent) = best_candidate
@@ -361,122 +424,98 @@ def request_scheduler(req_queue,  selected_requests, start_time,num_cached,promp
             new_size_of_queues =  req_queue.qsize() 
             throughput = size_of_queues + request_count_per_min - new_size_of_queues
             size_of_queues = new_size_of_queues
-            # with open(log_file, "a") as f:
-            #     f.write(f"{minute},{request_count_per_min / elapsed_time * 60},{throughput / elapsed_time * 60}\n")
+            with open(log_file, "a") as f:
+                f.write(f"{minute},{request_count_per_min / elapsed_time * 60},{throughput / elapsed_time * 60}\n")
             request_count_per_min = 0
             last_check_time_queue = current_time
-        time.sleep(time_gap)
-        
-    for _ in range(num_gpus):
-        req_queue.put(None)  # Each worker will receive one None signal
+
+    while not req_queue.empty():
+        while not new_cache_queue.empty():
+            cache_data = new_cache_queue.get()  # Retrieves the dictionary from the queue
+            new_cached_latents = cache_data['cached_latents']
+            new_cached_prompt = cache_data['prompt']
+            new_query_embedding = cache_data['query_embedding']
+            while len(cache.item_map) + len(cache.k_values) > cache.max_size:
+                evicted_index = cache.evict()
+                if evicted_index is not None:
+                    del cached_requests[evicted_index]
+                    index , final_text_embeddings = evict_from_faiss(index, final_text_embeddings, evicted_index)
+
+            
+            num_embeddings = index.ntotal
+            cached_requests.append(new_cached_prompt) 
+            index.add(new_query_embedding)
+
+
+            final_text_embeddings = np.concatenate((final_text_embeddings, new_query_embedding), axis=0)
+            
+            for idx, k in enumerate(k_values):
+                cache.insert(num_embeddings , 0, k, new_cached_latents[idx])
                 
     while True:
-        # if req_queue.empty():
-        #     # Check if all workers have finished or dropped
-        all_done = all(status in ["finished", "dropped"] for status in worker_status.values())
-        if all_done:
-            print("[Scheduler] All workers have finished. Terminating.")
-            time.sleep(10)
-            break  # Exit scheduler loop
+        if req_queue.empty():
+            # Check if all workers have finished or dropped
+            all_done = all(status in ["finished", "dropped"] for status in worker_status.values())
+            if all_done:
+                print("[Scheduler] All workers have finished. Terminating.")
+                break  # Exit scheduler loop
 
         time.sleep(1)  # Prevent busy waiting
 
 
 # Worker Process
-def worker(gpu_id, req_queue, new_cache_queue,latency_queue,model_type, worker_status):
+def worker(gpu_id, req_queue, new_cache_queue,latency_queue, worker_status):
     device = f"cuda:{gpu_id}"
     seed = 42 #any
     generator = torch.Generator(device).manual_seed(seed)
-    model = load_model(model_type, device)
+    model = load_model(device)
     scheduler = FlowMatchEulerDiscreteScheduler.from_config(model.scheduler.config)
-    num_inference_steps = 50
     idle_counter = 0
     max_idle_iterations = 100 # Set a threshold for termination
     while True:
         try:
             
             request = req_queue.get(timeout=10)
-            if request is None:
-                print(f"[Worker {gpu_id}] Received termination signal. Exiting...")
-                worker_status[gpu_id] = "finished"
-                break  
             idle_counter = 0
             prompt = request['prompt']
-            clean_prompt = re.sub(r'[^\w\-_\.]', '_', prompt)[:230]
-            
-            generated_image_path = f"{args.image_directory}/{clean_prompt}.png"
-
+            clean_prompt = re.sub(r'[^\w\-_\.]', '_', prompt)[:300]
             # no hit
             if request['cached'] is None:
-                if model_type == "sd3.5":
-                    timesteps_batch = precompute_timesteps_for_labels_35(scheduler, [0], "cpu",0)[0]
-                    prompt_embeds, pooled_prompt_embeds, latents = model.input_process(prompt = prompt,negative_prompt = None, generator=generator, callback_on_step_end=None,
-                    callback_on_step_end_tensor_inputs=["latents"])
-                    model_outputs = model(prompt = prompt, prompt_embeds = prompt_embeds, pooled_prompt_embeds = pooled_prompt_embeds, generator=generator, callback_on_step_end=None,
-                    callback_on_step_end_tensor_inputs=["current_latents"], timesteps_batch = timesteps_batch,
-                    cached_timestep=None ,labels_batch = 0, current_latents=latents, height=1024, width=1024)
-                    try:
-                        model_outputs[1][0].save(generated_image_path)     
-                    except Exception as e:
-                        print(f"Failed to save image: {e}")
-                        print("image name:", prompt)
+                timesteps_batch = precompute_timesteps_for_labels_35(scheduler, [0], "cpu",0)[0]
+                prompt_embeds, pooled_prompt_embeds, latents = model.input_process(prompt = prompt,negative_prompt = None, generator=generator, callback_on_step_end=None,
+                callback_on_step_end_tensor_inputs=["latents"])
+                model_outputs = model(prompt = prompt, prompt_embeds = prompt_embeds, pooled_prompt_embeds = pooled_prompt_embeds, generator=generator, callback_on_step_end=None,
+                callback_on_step_end_tensor_inputs=["current_latents"], timesteps_batch = timesteps_batch,
+                cached_timestep=None ,labels_batch = 0, current_latents=latents, height=1024, width=1024)
                 
-                    cached_latent = model_outputs[0].cpu()
-                    cached_latents = cached_latent.clone().share_memory_()
-                elif model_type == "flux":
-                    # timesteps_batch = precompute_timesteps_for_labels_flux(scheduler, [0], "cpu",0)[0]
-                    model_outputs = model(prompt = prompt,generator=generator, callback_on_step_end=None,
-                    callback_on_step_end_tensor_inputs=None, pre_computed_timesteps = None, num_inference_steps =50,
-                    latents=None, height=1024, width=1024, hit=False,)
-                    try:
-                        model_outputs[1].images[0].save(generated_image_path)     
-                    except Exception as e:
-                        print(f"Failed to save image: {e}")
-                        print("image name:", prompt)
-                    cached_latent = model_outputs[0].cpu()
-                    cached_latents = cached_latent.clone().share_memory_()
+                generated_image_path = f"{args.image_directory}/{clean_prompt}.png"
+                
+                cached_latent = model_outputs[0].cpu()
+                cached_latents = cached_latent.clone().share_memory_()
                 query_embedding = request['query_embedding']
-                # print("new latents shape:", cached_latents.shape)
-                new_cache_queue.put({'cached_latents': cached_latents.cpu().share_memory_(), 'prompt':prompt, 'query_embedding': query_embedding.cpu()}) 
+                new_cache_queue.put({'cached_latents': cached_latents.cpu().share_memory_(), 'prompt':prompt, 'query_embedding': query_embedding.cpu()})
+                try:
+                    model_outputs[1][0].save(generated_image_path)     
+                except Exception as e:
+                    print(f"Failed to save image: {e}")
+                    print("image name:", prompt)
+                    
             else:
                 # print(request['latent'].size())
-                # print(request)
-                if model_type == "sd3.5":
-                    timesteps_batch = precompute_timesteps_for_labels_35(scheduler, [1], "cpu",request['k'])[0]
-                    prompt_embeds, pooled_prompt_embeds, latents = model.input_process(prompt = prompt,negative_prompt = None, generator=generator, callback_on_step_end=None,
-                    callback_on_step_end_tensor_inputs=["latents"])
-                    model_outputs = model(prompt = prompt, prompt_embeds = prompt_embeds, pooled_prompt_embeds = pooled_prompt_embeds, generator=generator, callback_on_step_end=None,
-                    callback_on_step_end_tensor_inputs=["current_latents"], timesteps_batch = timesteps_batch,
-                    cached_timestep=None ,labels_batch = 1, current_latents=request['latent'].unsqueeze(0).to(dtype=torch.bfloat16).to(device), height=1024, width=1024)
-                    try:
-                        model_outputs[0].save(generated_image_path)
-                    except Exception as e:
-                        print(f"Failed to save image: {e}")
-                        print("image name:", prompt)
-                elif model_type == "flux":
-                    image_seq_len = request['latent'].shape[0]
-                    # print("latents shape:",request['latent'].shape)
-                    # print("image_seq_len:", image_seq_len)
-                    mu = calculate_shift(
-                        image_seq_len,
-                        model.scheduler.config.base_image_seq_len,
-                        model.scheduler.config.max_image_seq_len,
-                        model.scheduler.config.base_shift,
-                        model.scheduler.config.max_shift,
-                    )
-                    sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) 
-                    # print("mu:", mu)
-                    # print("sigmas:", sigmas)
-                    timesteps_batch = precompute_timesteps_for_labels_flux(scheduler, [1], "cpu",request['k'],mu,sigmas)[0]
-                    # print("timesteps:", timesteps_batch)
-                    model_outputs = model(prompt = prompt,generator=generator, callback_on_step_end=None,
-                    callback_on_step_end_tensor_inputs=None, pre_computed_timesteps = timesteps_batch, num_inference_steps =50,
-                    latents=request['latent'].unsqueeze(0).to(dtype=torch.bfloat16).to(device), height=1024, width=1024, hit=True,)
-                    try:
-                        model_outputs.images[0].save(generated_image_path)     
-                    except Exception as e:
-                        print(f"Failed to save image: {e}")
-                        print("image name:", prompt)
+                timesteps_batch = precompute_timesteps_for_labels_35(scheduler, [1], "cpu",request['k'])[0]
+                prompt_embeds, pooled_prompt_embeds, latents = model.input_process(prompt = prompt,negative_prompt = None, generator=generator, callback_on_step_end=None,
+                callback_on_step_end_tensor_inputs=["latents"])
+                model_outputs = model(prompt = prompt, prompt_embeds = prompt_embeds, pooled_prompt_embeds = pooled_prompt_embeds, generator=generator, callback_on_step_end=None,
+                callback_on_step_end_tensor_inputs=["current_latents"], timesteps_batch = timesteps_batch,
+                cached_timestep=None ,labels_batch = 1, current_latents=request['latent'].unsqueeze(0).to(dtype=torch.bfloat16).to(device), height=1024, width=1024)
+                
+                generated_image_path = f"{args.image_directory}/{clean_prompt}.png"
+                try:
+                    model_outputs[0].save(generated_image_path)
+                except Exception as e:
+                    print(f"Failed to save image: {e}")
+                    print("image name:", prompt)
+                    
             finish_time = time.time() - request['start_time']
             print(f"[Worker {gpu_id}] Processed request latency: {finish_time}")
             latency_queue.put(finish_time)
@@ -492,6 +531,8 @@ def worker(gpu_id, req_queue, new_cache_queue,latency_queue,model_type, worker_s
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
     torch.multiprocessing.set_sharing_strategy("file_system")
+    num_gpus = torch.cuda.device_count()
+
     device = "cuda:0"
     test_prompt = "a dog riding a bike"
     large_model_latency = []
@@ -500,7 +541,7 @@ if __name__ == "__main__":
             "stabilityai/stable-diffusion-3.5-large", torch_dtype=torch.bfloat16
         ).to(device)
         scheduler = FlowMatchEulerDiscreteScheduler.from_config(large_model.scheduler.config)
-        for i in range(3):
+        for i in range(2):
             start_time = time.time()
             timesteps_batch = precompute_timesteps_for_labels_35(scheduler, [0], "cpu",0)[0]
             prompt_embeds, pooled_prompt_embeds, latents = large_model.input_process(prompt = test_prompt,negative_prompt = None, callback_on_step_end=None,
@@ -519,9 +560,9 @@ if __name__ == "__main__":
 
     elif args.large_model == "flux":
         large_model =  DiffusionPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16).to(device)
-        for i in range(1):
+        for i in range(2):
             start_time = time.time()
-            image = large_model(prompt = test_prompt, num_inference_steps = 50, height=1024, width=1024, hit=False)[1].images[0]
+            image = large_model(prompt = test_prompt, num_inference_steps = 50, height=1024, width=1024).images[0]
             end_time = time.time()
             large_model_latency.append(end_time - start_time) 
         avg_latency_large = sum(large_model_latency) / len(large_model_latency)
@@ -531,68 +572,83 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
         gc.collect()
 
-
+    small_model_latency = []
+    if args.small_model == "sdxl":
+        small_model = StableDiffusionXLPipeline.from_pretrained(
+            "stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch.float16
+        ).to(device)
+        for i in range(5):
+            start_time = time.time()
+            small_model(prompt = test_prompt, num_inference_steps = 50, height=1024, width=1024)
+            end_time = time.time()
+            small_model_latency.append(end_time - start_time) 
+        avg_latency_small = sum(small_model_latency) / len(small_model_latency)
+        print(f"Average small model Latency: {avg_latency_small:.4f} seconds")
+        # Release memory
+        del small_model
+        torch.cuda.empty_cache()
+        gc.collect()
+    elif args.small_model == "sana":
+        small_model =  SanaPipeline.from_pretrained(
+            "Efficient-Large-Model/Sana_1600M_1024px_BF16_diffusers",
+            variant="bf16",
+            torch_dtype=torch.bfloat16,
+        ).to(device)
+        for i in range(5):
+            start_time = time.time()
+            small_model(prompt = test_prompt, num_inference_steps = 50, height=1024, width=1024)
+            end_time = time.time()
+            small_model_latency.append(end_time - start_time) 
+        avg_latency_small = sum(small_model_latency) / len(small_model_latency)
+        print(f"Average small model Latency: {avg_latency_small:.4f} seconds")
+        # Release memory
+        del small_model
+        torch.cuda.empty_cache()
+        gc.collect()
     processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
     clip_model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(device)
-    if args.dataset == 'diffusiondb':
-        metadata_df = pd.read_parquet('./metadata.parquet')
-        if 'timestamp' in metadata_df.columns:
-            sorted_df = metadata_df.sort_values(by='timestamp')
-            
-            # Set all seconds_from_start to zero
-            sorted_df['seconds_from_start'] = 0
+    metadata_df = pd.read_parquet('./metadata.parquet')
 
-            # Display modified DataFrame
-            print(sorted_df[['timestamp', 'seconds_from_start']].head())
-        else:
-            print("No timestamp column found in the DataFrame.")
-
-
-        sorted_df = sorted_df.sort_values(by='seconds_from_start')
-        selected_requests = sorted_df.iloc[50000:50000 + args.num_req].copy()
-        # Force all timestamps to be zero
-        selected_requests['seconds_from_start'] = 0
-        num_requests = len(selected_requests)
-            # Print each value with its index
-        for i, seconds in enumerate(selected_requests['seconds_from_start']):
-            print(f"Request {i+1}: {seconds:.2f}")
-    elif args.dataset == "MJHQ":
-        meta_data_path = "./MoDM_cache/MJHQ/meta_data.json"
-        # Load metadata
-        with open(meta_data_path, "r") as f:
-            meta_data = json.load(f)
-        meta_keys = list(meta_data.keys())
-        # Select last 500 from each 3000-chunk
-        selected_keys = []
-        chunk_size = 3000
-        num_chunks = len(meta_data) // chunk_size # 10 chunks
-        for i in range(num_chunks):
-            start = int((i + 1) * chunk_size - args.num_req / 10)
-            end = int((i + 1) * chunk_size)
-            selected_keys.extend(meta_keys[start:end])
-        # Create subset dictionary
-        selected_requests = {key: meta_data[key] for key in selected_keys}
-        for key in selected_requests:
-            selected_requests[key]['seconds_from_start'] = 0 
-        selected_requests = pd.DataFrame.from_dict(selected_requests, orient='index')
+    if 'timestamp' in metadata_df.columns:
+        # print("First few entries in the 'timestamp' column:")
+        # print(metadata_df['timestamp'].head())
         
-    num_requests = args.num_req    
+        # Optionally sort by date
+        # metadata_df['timestamp'] = pd.to_datetime(metadata_df['timestamp'])  # Ensure it's in datetime format
+        sorted_df = metadata_df.sort_values(by='timestamp')
+        start_time = sorted_df['timestamp'].iloc[0]
+        
+        # Add a new column for seconds relative to the start time
+        sorted_df['seconds_from_start'] = (sorted_df['timestamp'] - start_time).dt.total_seconds()
+
+        # Display the modified DataFrame
+        print(sorted_df[['timestamp', 'seconds_from_start']].head())
+        # print("Sorted DataFrame by timestamp:")
+        # print(sorted_df.head())
+    else:
+        print("No timestamp column found in the DataFrame.")
+        
     image_directory = args.cache_directory
 
     # Get a list of all image file paths in the directory
     image_paths = [os.path.join(image_directory, img_file) for img_file in os.listdir(image_directory) if img_file.endswith(('.png', '.jpg', '.jpeg'))]
     cached_requests = [extract_prompt(image_path) for image_path in image_paths]
     print("number of cached:", len(cached_requests))
-    
-    prompt_to_index = {}
-    for i, prompt in enumerate(cached_requests):
-        prompt_to_index[prompt] = i
-    # sorted_df = sorted_df.sort_values(by='seconds_from_start')
-    # selected_requests = sorted_df.iloc[50000:51000].copy()
-    # num_requests = len(selected_requests)
-    # selected_requests['seconds_from_start'] = generate_rapidly_increasing_seconds_from_start(
-    # num_requests, min_rate=1, max_rate=9
-    # )
+    sorted_df = sorted_df.sort_values(by='seconds_from_start')
+    selected_requests = sorted_df.iloc[50000:50000+args.num_req].copy()
+    num_requests = len(selected_requests)
+    large_throughput_per_gpu = 1 / avg_latency_large
+    small_throughput_per_gpu = 1 / avg_latency_small 
+    work_large = 0.3
+    work_small = 0.7 * 0.8 * large_throughput_per_gpu / small_throughput_per_gpu
+    gpus_for_large = min(np.round(work_large/(work_large+work_small) * num_gpus),num_gpus-1)
+
+    time_gap = 1 / (large_throughput_per_gpu * gpus_for_large + small_throughput_per_gpu * (num_gpus - gpus_for_large))
+    time_gap = max(time_gap-0.05, 0)
+    print('time gap:', time_gap)
+    selected_requests['seconds_from_start'] = generate_rapidly_increasing_seconds_from_start(
+    num_requests, min_rate=1, max_rate=(1/time_gap)*60
+    )
     
  
 
@@ -635,39 +691,23 @@ if __name__ == "__main__":
     # Concatenate all image embeddings into a single tensor
     final_text_embeddings = torch.cat(text_embeddings, dim=0)
     final_text_embeddings = final_text_embeddings.cpu()
-    torch.save(final_text_embeddings, f"final_text_embeddings_{args.dataset}_{args.large_model}.pt")
+    torch.save(final_text_embeddings, "final_text_embeddings.pt")
     print(f"Generated embeddings for {len(cached_requests)} images.")
     
     # final_text_embeddings = final_text_embeddings[0:3333]
     # cached_requests = cached_requests[0:3333]
-    if args.large_model == 'sd3.5':
-        if args.dataset == "diffusiondb":
-            final_latents = torch.load("./MoDM_cache/DiffusionDB/cached_latents_1.pt", map_location="cpu")
-            final_latents_1 = torch.load("./MoDM_cache/DiffusionDB/cached_latents_2.pt", map_location="cpu")
-            final_latents_2 = torch.load("./MoDM_cache/DiffusionDB/cached_latents_3.pt", map_location="cpu")   
-        elif args.dataset == "MJHQ":
-            final_latents = torch.load("./MoDM_cache/MJHQ/cached_latents_1.pt", map_location="cpu")
-            final_latents_1 = torch.load("./MoDM_cache/MJHQ/cached_latents_2.pt", map_location="cpu")
-            final_latents_2 = torch.load("./MoDM_cache/MJHQ/cached_latents_3.pt", map_location="cpu")
-        
-        final_latents = torch.cat((final_latents,final_latents_1), dim=0)
-        final_latents = torch.cat((final_latents,final_latents_2), dim=0)
-    elif args.large_model == 'flux':
-        final_latents = torch.load("/home/stilex/MoDM/serving/flux_latents/cached_latents_0.pt", map_location="cpu")
-        final_latents_1 = torch.load("/home/stilex/MoDM/serving/flux_latents/cached_latents_1.pt", map_location="cpu")
-        final_latents_2 = torch.load("/home/stilex/MoDM/serving/flux_latents/cached_latents_2.pt", map_location="cpu")
-        final_latents_3 = torch.load("/home/stilex/MoDM/serving/flux_latents/cached_latents_3.pt", map_location="cpu")
-        final_latents = torch.cat((final_latents,final_latents_1), dim=0)
-        final_latents = torch.cat((final_latents,final_latents_2), dim=0)
-        final_latents = torch.cat((final_latents,final_latents_3), dim=0)
+    
+    final_latents = torch.load("cached_latents_1.pt", map_location="cpu")
+    final_latents_1 = torch.load("cached_latents_2.pt", map_location="cpu")
+    final_latents_2 = torch.load("cached_latents_3.pt", map_location="cpu")
+
+    final_latents = torch.cat((final_latents,final_latents_1), dim=0)
+    final_latents = torch.cat((final_latents,final_latents_2), dim=0)
 
 
-
-
-    print("final latents shape:",final_latents.shape)
     assert final_latents.shape[0] == 5 * final_text_embeddings.shape[0], \
     f"Assertion failed: {final_latents.shape[0]} != 5 * {final_text_embeddings.shape[0]}"
-    num_cached = len(cached_requests)
+    
     embedding_dim = 768  # CLIP model output dimension
     index = faiss.IndexFlatL2(embedding_dim)  # Using FAISS for ANN search
     index.add(final_text_embeddings.numpy())  # Add text embeddings to FAISS index
@@ -684,25 +724,19 @@ if __name__ == "__main__":
     
     cache = KMinHeapCache(max_size=args.cache_size * 5, initial_embeddings=final_text_embeddings, latents=final_latents)
 
-    large_throughput_per_gpu = 1 / (avg_latency_large * 0.9)
-
-    time_gap = 1 / (large_throughput_per_gpu * num_gpus )
-    time_gap = max(time_gap, 0)
-    print('time gap:', time_gap)
-
     k_values = [5, 10, 15, 20, 25]
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     start_time = time.time()
 
-    scheduler = mp.Process(target=request_scheduler, args=(req_queue,  selected_requests, start_time,num_cached,prompt_to_index, index, cache,new_cache_queue,cached_requests, final_text_embeddings, k_values, processor, clip_model, worker_status, num_gpus, time_gap))
+    scheduler = mp.Process(target=request_scheduler, args=(req_queue,  selected_requests, start_time, index, cache,new_cache_queue,cached_requests, final_text_embeddings, k_values, processor, clip_model, worker_status))
 
     scheduler.start()
 
     workers = []
     for gpu_id in range(num_gpus):
         worker_status[gpu_id] = "starting"
-        p = mp.Process(target=worker, args=(gpu_id, req_queue, new_cache_queue,latency_queue,args.large_model, worker_status))
+        p = mp.Process(target=worker, args=(gpu_id, req_queue, new_cache_queue,latency_queue, worker_status))
         p.start()
         workers.append(p)
 
@@ -723,10 +757,6 @@ if __name__ == "__main__":
     for i, latency in enumerate(all_latencies):
         print(f"{latency:.4f}")
 
-    if all_latencies:
-        total_time = all_latencies[-1] 
-        throughput = args.num_req / total_time * 60
-        print(f"\n📈 Total Time: {total_time:.4f} seconds")
-        print(f"Throughput: {throughput:.2f} requests/min")
-    else:
-        print("No latencies recorded.")
+    # print(f"\n📊 **Latency Summary**: Min = {min(all_latencies):.4f}s, Max = {max(all_latencies):.4f}s, Avg = {sum(all_latencies)/len(all_latencies):.4f}s")
+
+    # print("[Main] All requests processed.")
