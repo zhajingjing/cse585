@@ -7,8 +7,9 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
 
-CSV   = "/home/soxehli/repos/cse585/ab_out/classification_template.csv"
-OUT   = "/home/soxehli/repos/cse585/ab_out/classification_shmoo.png"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+CSV   = os.path.join(PROJECT_ROOT, "ab_out", "classification_template.csv")
+OUT   = os.path.join(PROJECT_ROOT, "ab_out", "classification_shmoo.png")
 BASES = ["dog", "car", "dancer"]
 AXES  = ["subject", "setting", "color", "motion", "texture", "style", "time_of_day"]
 KS    = [2, 5, 7, 10]

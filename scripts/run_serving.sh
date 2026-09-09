@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-SERVING_SCRIPT="${SERVING_SCRIPT:-$ROOT_DIR/serving_system_video_teacache.py}"
+SERVING_SCRIPT="${SERVING_SCRIPT:-$SCRIPT_DIR/serving/serving_system_video_teacache.py}"
 
-DEFAULT_CKPT_DIR="/root/autodl-tmp/Wan2.1-T2V-1.3B"
+DEFAULT_CKPT_DIR="$PROJECT_ROOT/pretrained/Wan2.1-T2V-1.3B"
 CKPT_DIR="${1:-${CKPT_DIR:-$DEFAULT_CKPT_DIR}}"
 
 if [[ -z "$CKPT_DIR" ]]; then
@@ -59,7 +60,7 @@ WORKLOADS=(
 
 # ── Output ───────────────────────────────────────────────────────────────────
 RUN_STAMP="${RUN_STAMP:-$(date +"%Y%m%d_%H%M%S")}"
-OUT_ROOT="${OUT_ROOT:-$ROOT_DIR/serving_runs/$RUN_STAMP}"
+OUT_ROOT="${OUT_ROOT:-$PROJECT_ROOT/serving_runs/$RUN_STAMP}"
 SUMMARY_CSV="$OUT_ROOT/summary.csv"
 
 mkdir -p "$OUT_ROOT"
@@ -132,7 +133,7 @@ echo "Sweep: ${#CACHE_SIZES[@]} cache sizes × ${#METHODS[@]} methods × ${#WORK
 for workload_spec in "${WORKLOADS[@]}"; do
   workload_name="${workload_spec%%:*}"
   workload_path="${workload_spec#*:}"
-  abs_workload_path="$ROOT_DIR/$workload_path"
+  abs_workload_path="$PROJECT_ROOT/$workload_path"
 
   if [[ ! -f "$abs_workload_path" ]]; then
     echo "Missing workload file: $abs_workload_path" >&2

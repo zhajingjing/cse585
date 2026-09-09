@@ -17,13 +17,13 @@ Distances:
   - optional LPIPS over sampled frames if `lpips` is installed
 
 Example:
-  python experiment_ab_cache_survival.py \
+  python scripts/experiments/experiment_ab_cache_survival.py \
     --ckpt_dir /path/to/Wan2.1-T2V-1.3B \
     --prompt_a "A cat walking on the street" \
     --prompt_b "A kitty walking along the sidewalk" \
     --output_dir ./ab_survival_out
 
-  python experiment_ab_cache_survival.py \
+  python scripts/experiments/experiment_ab_cache_survival.py \
     --ckpt_dir /path/to/Wan2.1-T2V-1.3B \
     --prompt_list eval/teacache/vbench/VBench_200_semantic_similar.json \
     --a_index 0 \
@@ -42,9 +42,12 @@ import numpy as np
 from PIL import Image
 import torch
 
-WAN_ROOT = os.path.join(os.path.dirname(__file__), "Wan2.1")
-if WAN_ROOT not in sys.path:
-    sys.path.insert(0, WAN_ROOT)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WAN_ROOT = os.path.join(PROJECT_ROOT, "Wan2.1")
+SERVING_ROOT = os.path.join(PROJECT_ROOT, "scripts", "serving")
+for import_path in (PROJECT_ROOT, WAN_ROOT, SERVING_ROOT):
+    if import_path not in sys.path:
+        sys.path.insert(0, import_path)
 
 import wan  # noqa: E402
 from eval.teacache.experiments.utils import read_prompt_list  # noqa: E402

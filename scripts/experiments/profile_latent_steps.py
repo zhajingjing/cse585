@@ -32,7 +32,11 @@ from tqdm import tqdm
 # from scipy.stats import spearmanr
 
 import sys, math
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "Wan2.1"))
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WAN_ROOT = os.path.join(PROJECT_ROOT, "Wan2.1")
+if WAN_ROOT not in sys.path:
+    sys.path.insert(0, WAN_ROOT)
 from wan.text2video import WanT2V
 from wan.configs import WAN_CONFIGS
 from wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
@@ -40,8 +44,10 @@ from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-# Path to the downloaded Wan2.1-T2V-1.3B checkpoint directory
-CKPT_DIR   = "/root/autodl-tmp/Wan2.1-T2V-1.3B"
+# Paths can be overridden through the corresponding environment variables.
+CKPT_DIR   = os.environ.get(
+    "WAN_CKPT_DIR", os.path.join(PROJECT_ROOT, "pretrained", "Wan2.1-T2V-1.3B")
+)
 NUM_STEPS  = 50
 HEIGHT     = 480
 WIDTH      = 832
@@ -49,7 +55,7 @@ NUM_FRAMES = 33        # ~2 s at 16 fps
 FPS        = 16
 SEED       = 42
 BATCH_SIZE = 2         # prompts per generate call (reduce if OOM)
-OUTPUT_DIR = "./profile_outputs"
+OUTPUT_DIR = os.environ.get("PROFILE_OUTPUT_DIR", os.path.join(PROJECT_ROOT, "profile_outputs"))
 
 # Standard Wan negative prompt (from model card)
 NEGATIVE_PROMPT = (

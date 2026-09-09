@@ -12,7 +12,7 @@ The important design choice is that **TeaCache state is reset at the start of ev
 Run from the project root:
 
 ```bash
-python serving_system_video_teacache.py \
+python scripts/serving/serving_system_video_teacache.py \
   --ckpt_dir /path/to/Wan2.1-T2V-1.3B \
   --prompt_list eval/teacache/vbench/VBench_full_info.json \
   --video_directory ./samples/wan_teacache_nirvana \
@@ -44,7 +44,7 @@ python serving_system_video_teacache.py \
 Quick run:
 
 ```bash
-python serving_system_video_teacache.py \
+python scripts/serving/serving_system_video_teacache.py \
   --ckpt_dir /path/to/Wan2.1-T2V-1.3B \
   --num_req 50 \
   --video_directory ./video_outputs_teacache
@@ -53,7 +53,7 @@ python serving_system_video_teacache.py \
 Custom size and frame count:
 
 ```bash
-python serving_system_video_teacache.py \
+python scripts/serving/serving_system_video_teacache.py \
   --ckpt_dir /path/to/Wan2.1-T2V-1.3B \
   --size 480*832 \
   --num_frames 33 \
@@ -63,14 +63,14 @@ python serving_system_video_teacache.py \
 Compare with and without Nirvana cache:
 
 ```bash
-python serving_system_video_teacache.py \
+python scripts/serving/serving_system_video_teacache.py \
   --ckpt_dir /path/to/Wan2.1-T2V-1.3B \
   --prompt_list eval/teacache/vbench/VBench_full_info.json \
   --num_req 20 \
   --video_directory ./out_with_nirvana \
   --eval_mode
 
-python serving_system_video_teacache.py \
+python scripts/serving/serving_system_video_teacache.py \
   --ckpt_dir /path/to/Wan2.1-T2V-1.3B \
   --prompt_list eval/teacache/vbench/VBench_full_info.json \
   --num_req 20 \

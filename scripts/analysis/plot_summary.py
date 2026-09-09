@@ -2,9 +2,10 @@ import csv, glob, json, os
 import numpy as np
 import matplotlib.pyplot as plt
 
-ROOTS  = ["/home/soxehli/repos/cse585/ab_out",
-          "/home/soxehli/repos/cse585/ab_out_k27"]
-WK     = "/home/soxehli/repos/cse585/eval/teacache/vbench/workload_ab_axes_{b}.json"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+ROOTS  = [os.path.join(PROJECT_ROOT, "ab_out"),
+          os.path.join(PROJECT_ROOT, "ab_out_k27")]
+WK     = os.path.join(PROJECT_ROOT, "eval", "teacache", "vbench", "workload_ab_axes_{b}.json")
 BASES  = ["dog", "car", "dancer"]
 AXES   = ["subject", "setting", "color", "motion", "texture", "style", "time_of_day"]
 KS     = [2, 5, 7, 10]
@@ -67,6 +68,6 @@ fig.colorbar(im1, ax=axs[1], shrink=0.8)
 fig.suptitle("A/B latent cache survival — how much of prompt B survives when resuming from A's step-k latent",
              fontsize=12, y=1.02)
 
-out = "/home/soxehli/repos/cse585/ab_out/summary_heatmap.png"
+out = os.path.join(PROJECT_ROOT, "ab_out", "summary_heatmap.png")
 plt.savefig(out, dpi=150, bbox_inches="tight")
 print(out)

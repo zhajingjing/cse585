@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-SERVING_SCRIPT="${SERVING_SCRIPT:-$ROOT_DIR/serving_system_video_teacache.py}"
+SERVING_SCRIPT="${SERVING_SCRIPT:-$SCRIPT_DIR/serving/serving_system_video_teacache.py}"
 
-DEFAULT_CKPT_DIR="/root/autodl-tmp/Wan2.1-T2V-1.3B"
+DEFAULT_CKPT_DIR="$PROJECT_ROOT/pretrained/Wan2.1-T2V-1.3B"
 CKPT_DIR="${1:-${CKPT_DIR:-$DEFAULT_CKPT_DIR}}"
 
 TASK="${TASK:-t2v-1.3B}"
@@ -23,14 +24,14 @@ REQUEST_INTERVAL_SECONDS="${REQUEST_INTERVAL_SECONDS:-}"
 ENABLE_LOG="${ENABLE_LOG:-1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
-WORKLOAD_PATH="${WORKLOAD_PATH:-$ROOT_DIR/eval/teacache/vbench/VBench_200_similar.json}"
+WORKLOAD_PATH="${WORKLOAD_PATH:-$PROJECT_ROOT/eval/teacache/vbench/VBench_200_similar.json}"
 if [[ ! -f "$WORKLOAD_PATH" ]]; then
   echo "Missing workload file: $WORKLOAD_PATH" >&2
   exit 1
 fi
 
 RUN_STAMP="${RUN_STAMP:-$(date +"%Y%m%d_%H%M%S")}"
-OUT_ROOT="${OUT_ROOT:-$ROOT_DIR/vbench200_similar_runs/$RUN_STAMP}"
+OUT_ROOT="${OUT_ROOT:-$PROJECT_ROOT/vbench200_similar_runs/$RUN_STAMP}"
 SUMMARY_CSV="$OUT_ROOT/summary.csv"
 
 mkdir -p "$OUT_ROOT"

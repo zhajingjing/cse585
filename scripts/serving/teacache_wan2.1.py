@@ -12,6 +12,11 @@ import torch, random
 import torch.distributed as dist
 from PIL import Image
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WAN_ROOT = os.path.join(PROJECT_ROOT, "Wan2.1")
+if WAN_ROOT not in sys.path:
+    sys.path.insert(0, WAN_ROOT)
+
 import wan
 from wan.configs import WAN_CONFIGS, SIZE_CONFIGS, MAX_AREA_CONFIGS, SUPPORTED_SIZES
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander

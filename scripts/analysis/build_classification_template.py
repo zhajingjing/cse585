@@ -6,13 +6,14 @@ Re-running is safe: existing classifications are preserved by row id.
 """
 import csv, glob, json, os
 
-ROOTS  = ["/home/soxehli/repos/cse585/ab_out",
-          "/home/soxehli/repos/cse585/ab_out_k27"]
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+ROOTS  = [os.path.join(PROJECT_ROOT, "ab_out"),
+          os.path.join(PROJECT_ROOT, "ab_out_k27")]
 BASES  = ["dog", "car", "dancer"]
 AXES   = ["subject", "setting", "color", "motion", "texture", "style", "time_of_day"]
 KS     = [2, 5, 7, 10]
-WK_TPL = "/home/soxehli/repos/cse585/eval/teacache/vbench/workload_ab_axes_{b}.json"
-OUT    = "/home/soxehli/repos/cse585/ab_out/classification_template.csv"
+WK_TPL = os.path.join(PROJECT_ROOT, "eval", "teacache", "vbench", "workload_ab_axes_{b}.json")
+OUT    = os.path.join(PROJECT_ROOT, "ab_out", "classification_template.csv")
 FIELDS = ["id", "classification", "base", "axis", "k", "pair"]
 
 # prompt → axis lookup from workload files

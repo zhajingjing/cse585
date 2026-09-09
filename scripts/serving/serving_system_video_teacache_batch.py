@@ -36,12 +36,14 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 from transformers import CLIPModel, CLIPProcessor
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+WAN_ROOT = os.path.join(PROJECT_ROOT, "Wan2.1")
+for import_path in (PROJECT_ROOT, WAN_ROOT):
+    if import_path not in sys.path:
+        sys.path.insert(0, import_path)
+
 from eval.teacache.experiments.utils import read_prompt_list
 from serving_system_N import KMinHeapCache
-
-WAN_ROOT = os.path.join(os.path.dirname(__file__), "Wan2.1")
-if WAN_ROOT not in sys.path:
-    sys.path.insert(0, WAN_ROOT)
 
 import wan  # noqa: E402
 from wan.configs import SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS  # noqa: E402
